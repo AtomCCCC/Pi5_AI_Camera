@@ -1,0 +1,26 @@
+# GPIO Service Configuration
+# ──────────────────────────
+
+mqtt:
+  broker: "localhost"
+  port: 1883
+  topic_command: "gpio/command"
+
+servo:
+  servo1:
+    pin: 12          # BCM GPIO pin for servo 1
+    min_pulse: 500   # microseconds (0°)
+    max_pulse: 2500  # microseconds (180°)
+    freq: 50         # PWM frequency in Hz
+  servo2:
+    pin: 13
+    min_pulse: 500
+    max_pulse: 2500
+    freq: 50
+
+screen:
+  type: "oled"      # "oled" | "tft" | "hdmi" | "lcd"
+  i2c_addr: 0x3C    # For SSD1306 OLED
+  width: 128
+  height: 64
+  font_size: 10

@@ -1,0 +1,51 @@
+version: "3.9"
+
+services:
+  mqtt:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - mosquitto_data:/mosquitto/data
+    restart: unless-stopped
+
+  voice:
+    build: ./voice_service
+    depends_on: [mqtt]
+    devices:
+      - /dev/snd:/dev/snd
+    restart: unless-stopped
+
+  vision:
+    build: ./vision_service
+    depends_on: [mqtt]
+    devices:
+      - /dev/h1x-0:/dev/h1x-0
+      - /dev/video0:/dev/video0
+    volumes:
+      - /opt/hailo:/opt/hailo:ro
+    restart: unless-stopped
+
+  llm:
+    build: ./llm_orchestrator
+    depends_on: [mqtt]
+    environment:
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+    restart: unless-stopped
+
+  gpio:
+    build: ./gpio_service
+    depends_on: [mqtt]
+    privileged: true
+    restart: unless-stopped
+
+  session:
+    build: ./session_manager
+    depends_on: [mqtt]
+    volumes:
+      - session_data:/var/lib/pi-assistant
+    restart: unless-stopped
+
+volumes:
+  mosquitto_data:
+  session_data:

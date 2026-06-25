@@ -1,0 +1,36 @@
+# LLM Orchestrator Configuration
+# ──────────────────────────────
+
+deepseek:
+  api_key_env: "DEEPSEEK_API_KEY"   # Load from environment variable
+  model: "deepseek-v4-flash"        # "deepseek-v4-flash" | "deepseek-v4-pro"
+  base_url: "https://api.deepseek.com"
+  timeout: 30
+
+ollama:
+  model: "qwen2.5:1.5b"             # Runs on Hailo-10H NPU
+  base_url: "http://localhost:11434"
+  fallback_model: "qwen2.5:3b"      # CPU fallback if Hailo unavailable
+
+router:
+  connectivity_check_interval: 30   # seconds
+  prefer_online: true               # Use DeepSeek when internet available
+
+system_prompt: |
+  You are a Raspberry Pi 5 AI assistant connected to a camera,
+  2 servo motors, and a display. You can detect objects in real time,
+  analyze scenes via a vision-language model, move servos, write to GPIO pins,
+  and display text on screen.
+
+  When no internet is available, you fall back to a local Qwen model.
+  Use the provided tools when the user asks about visual input or physical actions.
+  Keep responses concise and natural for voice output.
+
+mqtt:
+  broker: "localhost"
+  port: 1883
+  topic_command_in: "command/in"
+  topic_response_out: "response/out"
+  topic_vision_query: "vision/query"
+  topic_vision_result: "vision/result"
+  topic_gpio_command: "gpio/command"
