@@ -85,8 +85,8 @@ pi5_assistant/
 |-----------|-----------|
 | **NPU** | Hailo-10H (40 TOPS, 8GB dedicated RAM) |
 | **CPU** | Raspberry Pi 5 (Cortex-A76 × 4, 8GB) |
-| **Camera** | Raspberry Pi Camera Module 3 |
-| **Object Detection** | YOLOv8n → Hailo-10H (430+ FPS @ 640×640) |
+| **Camera** | Raspberry Pi Camera Module 3 (IMX708, 30fps native, dynamic FPS/resolution) |
+| **Object Detection** | YOLOv8n → Hailo-10H (430+ FPS @ 640×640, resized from any capture res) |
 | **VLM (Path A)** | Hailo VLM on NPU (fast, zero-CPU load) |
 | **VLM (Path B)** | Qwen2.5-VL-3B on CPU via Ollama (fallback) |
 | **LLM (Online)** | DeepSeek V4 Flash API ($0.14/M tokens) |

@@ -2,18 +2,25 @@
 
 Runs in a dedicated background thread. Writes results to SharedDetectionBuffer.
 Camera Module 3 → Hailo-10H YOLO pipeline → shared_buffer.
+
+Supports dynamic FPS/resolution adjustment:
+- Detects motion by frame differencing
+- High motion → lower res + higher FPS (e.g. 640×320 @ 60fps)
+- Low motion  → full res + normal FPS (e.g. 640×640 @ 30fps)
 """
 
 import time
 import threading
 import logging
+from collections import deque
+import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 
 class DetectionPipeline:
-    """Continuous YOLO detection on Hailo-10H."""
+    """Continuous YOLO detection on Hailo-10H with dynamic motion adjustment."""
 
     def __init__(self, shared_buffer, config: dict):
         self.shared_buffer = shared_buffer
@@ -21,6 +28,16 @@ class DetectionPipeline:
         self._running = False
         self._thread: threading.Thread | None = None
         self._fps = 0.0
+
+        # Dynamic adjustment state
+        da = config["camera"].get("dynamic_adjust", {})
+        self._dynamic_enabled = da.get("enabled", False)
+        self._prev_gray = None
+        self._motion_scores = deque(maxlen=da.get("motion_window", 5))
+        self._last_adjust_time = 0.0
+        self._check_interval = da.get("check_interval", 0.5)
+        self._motion_threshold = da.get("motion_threshold", 30)
+        self._current_profile = "low_motion"
 
     def start(self):
         """Start the detection thread."""
@@ -41,8 +58,64 @@ class DetectionPipeline:
         else:
             self._run_fallback()
 
+    def _resolve_camera_config(self):
+        """Return current (width, height, framerate) based on motion profile."""
+        if not self._dynamic_enabled:
+            res = self.config["camera"]["base_resolution"]
+            fps = self.config["camera"]["base_framerate"]
+            return res[0], res[1], fps
+
+        profiles = self.config["camera"]["dynamic_adjust"]["profiles"]
+        profile = profiles.get(self._current_profile, profiles["low_motion"])
+        w, h = profile["resolution"]
+        fps = profile["framerate"]
+        return w, h, fps
+
+    def _estimate_motion(self, frame: np.ndarray) -> float:
+        """Compute mean absolute difference between current and previous frame."""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if self._prev_gray is None:
+            self._prev_gray = gray
+            return 0.0
+        diff = cv2.absdiff(gray, self._prev_gray)
+        self._prev_gray = gray
+        return float(np.mean(diff))
+
+    def _maybe_adjust_profile(self, frame: np.ndarray, now: float):
+        """Check motion and switch camera profile if needed."""
+        if not self._dynamic_enabled:
+            return
+        if now - self._last_adjust_time < self._check_interval:
+            return
+
+        # Use a downscaled frame for faster motion estimation
+        small = cv2.resize(frame, (160, 120))
+        score = self._estimate_motion(small)
+        self._motion_scores.append(score)
+        avg_motion = np.mean(self._motion_scores)
+
+        new_profile = "high_motion" if avg_motion > self._motion_threshold else "low_motion"
+        if new_profile != self._current_profile:
+            self._current_profile = new_profile
+            self._last_adjust_time = now
+            label = self.config["camera"]["dynamic_adjust"]["profiles"][new_profile]["label"]
+            w, h, fps = self._resolve_camera_config()
+            self._reconfigure_camera(w, h, fps)
+            logger.info(f"Motion profile → {label} ({w}×{h} @ {fps}fps, motion={avg_motion:.1f})")
+
+        self._last_adjust_time = now
+
+    def _reconfigure_camera(self, width: int, height: int, fps: int):
+        """Dynamically change camera capture parameters."""
+        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        self._cap.set(cv2.CAP_PROP_FPS, fps)
+        # Flush buffer so next frames use the new config
+        for _ in range(5):
+            self._cap.grab()
+
     def _run_hailo(self):
-        """Hailo-10H accelerated pipeline."""
+        """Hailo-10H accelerated pipeline with dynamic FPS/resolution."""
         import hailo  # HailoRT Python bindings
         import cv2
 
@@ -53,41 +126,49 @@ class DetectionPipeline:
         network_group.activate()
 
         # Configure camera
-        w, h = self.config["camera"]["resolution"]
-        cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-        cap.set(cv2.CAP_PROP_FPS, self.config["camera"]["framerate"])
+        w, h, fps = self._resolve_camera_config()
+        self._cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        self._cap.set(cv2.CAP_PROP_FPS, fps)
+
+        # YOLO always runs at its trained resolution
+        yolo_w, yolo_h = self.config["camera"]["base_resolution"]
 
         frame_count = 0
         fps_timer = time.time()
 
         while self._running:
-            ret, frame = cap.read()
+            ret, frame = self._cap.read()
             if not ret:
                 continue
 
-            # Preprocess
-            resized = cv2.resize(frame, (w, h))
+            now = time.time()
+
+            # Dynamic motion check
+            self._maybe_adjust_profile(frame, now)
+
+            # Resize captured frame to YOLO input size
+            resized = cv2.resize(frame, (yolo_w, yolo_h))
             input_tensor = np.expand_dims(resized.transpose(2, 0, 1), 0).astype(np.float32)
 
             # Infer on Hailo-10H
             output = network_group.run(input_tensor)[0]
 
             # Post-process (NMS, threshold)
-            detections = self._postprocess(output, w, h)
+            detections = self._postprocess(output, yolo_w, yolo_h)
 
-            # Update shared buffer
+            # Update shared buffer with original frame + detections
             self.shared_buffer.update(detections, frame)
 
             # FPS tracking
             frame_count += 1
-            if time.time() - fps_timer >= 1.0:
-                self._fps = frame_count / (time.time() - fps_timer)
+            if now - fps_timer >= 1.0:
+                self._fps = frame_count / (now - fps_timer)
                 frame_count = 0
-                fps_timer = time.time()
+                fps_timer = now
 
-        cap.release()
+        self._cap.release()
 
     def _postprocess(self, output, width, height) -> list[dict]:
         """Convert raw Hailo output to structured detections."""
@@ -110,10 +191,14 @@ class DetectionPipeline:
         return detections
 
     def _run_fallback(self):
-        """CPU-only fallback using OpenCV DNN."""
+        """CPU-only fallback using OpenCV DNN with dynamic adjustment."""
         import cv2
-        w, h = self.config["camera"]["resolution"]
-        cap = cv2.VideoCapture(0)
+        w, h, fps = self._resolve_camera_config()
+        self._cap = cv2.VideoCapture(0)
+        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        self._cap.set(cv2.CAP_PROP_FPS, fps)
+
         net = cv2.dnn.readNet(
             f"{self.config['detection']['model']}.weights",
             f"{self.config['detection']['model']}.cfg"
@@ -121,17 +206,22 @@ class DetectionPipeline:
         net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
         net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
 
+        yolo_w, yolo_h = self.config["camera"]["base_resolution"]
+
         while self._running:
-            ret, frame = cap.read()
+            ret, frame = self._cap.read()
             if not ret:
                 continue
-            blob = cv2.dnn.blobFromImage(frame, 1/255.0, (w, h), swapRB=True)
+
+            now = time.time()
+            self._maybe_adjust_profile(frame, now)
+
+            blob = cv2.dnn.blobFromImage(frame, 1/255.0, (yolo_w, yolo_h), swapRB=True)
             net.setInput(blob)
             output = net.forward()
-            # Post-process and update buffer
-            self.shared_buffer.update(self._postprocess_yolo(output, w, h), frame)
+            self.shared_buffer.update(self._postprocess_yolo(output, yolo_w, yolo_h), frame)
 
-        cap.release()
+        self._cap.release()
 
     @property
     def fps(self) -> float:
