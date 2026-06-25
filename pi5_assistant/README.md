@@ -1,4 +1,4 @@
-# Pi 5 AI Assistant
+# Pi5 AI Camera
 
 Voice-interactive AI assistant for **Raspberry Pi 5 (8GB)** with **Hailo-10H AI HAT+ 2 (40 TOPS)**.
 Features real-time object detection, local/cloud LLM reasoning, voice interrupt, and GPIO servo/screen control.
@@ -106,8 +106,8 @@ sudo apt install mosquitto mosquitto-clients python3-pip python3-venv
 sudo systemctl enable mosquitto
 
 # 2. Clone and setup
-git clone https://github.com/AtomCCCC/pi5-ai-assistant.git
-cd pi5-ai-assistant
+git clone https://github.com/AtomCCCC/Pi5_AI_Camera.git
+cd Pi5_AI_Camera
 python3 -m venv .venv
 source .venv/bin/activate
 

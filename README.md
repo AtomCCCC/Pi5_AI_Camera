@@ -1,4 +1,4 @@
-# Raspberry Pi 5 AI Assistant — Complete Architecture Document
+# Pi5 AI Camera — Complete Architecture Document
 
 > **Author:** AI-assisted design  
 > **Date:** 2026-06-25  
