@@ -33,7 +33,7 @@
 
 This project turns a Raspberry Pi 5 into a **voice-interactive AI assistant** with:
 
-- **Real-time object detection** at 30+ FPS via the Hailo-10H NPU
+- **Real-time object detection** at 30+ FPS via the Hailo-10H NPU, with dynamic camera FPS/resolution adjustment based on motion
 - **Vision-language understanding** (two interchangeable paths)
 - **Voice control** with interrupt capability (new command cancels current action)
 - **LLM-powered reasoning** via DeepSeek V4 API (online) or local Qwen (offline)
@@ -51,7 +51,7 @@ This project turns a Raspberry Pi 5 into a **voice-interactive AI assistant** wi
 |-----------|-------------|------|--------|
 | SBC | Raspberry Pi 5, 8GB RAM | Host OS, voice pipeline, orchestration, GPIO | Confirmed |
 | AI Accelerator | AI HAT+ 2 (Hailo-10H), 40 TOPS, 8GB LPDDR4X | YOLO detection, VLM, local LLM inference | Confirmed |
-| Camera | Raspberry Pi Camera Module 3 | Real-time video input | Confirmed |
+| Camera | Raspberry Pi Camera Module 3 (IMX708) | Real-time video input, dynamic FPS/resolution (30fps @ 640×640 idle, 60fps @ 640×320 on motion) | Confirmed |
 | Microphone | USB class-compliant microphone | Voice capture | Needed |
 | Speaker | 3.5mm or USB speaker | Audio output | Needed |
 | Cooling | Active Cooler (official or third-party) | Mandatory — Pi 5 throttles without airflow on sustained load | Needed |
@@ -64,7 +64,7 @@ This project turns a Raspberry Pi 5 into a **voice-interactive AI assistant** wi
 
 | Task | Runs On | Performance | CPU Load |
 |------|---------|-------------|----------|
-| YOLOv8n object detection (640×640) | Hailo-10H NPU | 430+ FPS | 0% |
+| YOLOv8n object detection (640×640) | Hailo-10H NPU | 430+ FPS (YOLO always @ 640×640, camera capture resized) | 0% |
 | YOLOv8s object detection (640×640) | Hailo-10H NPU | 500+ FPS | 0% |
 | VLM scene understanding (Path A) | Hailo-10H NPU + 8GB RAM | ~1-3s latency | 0% |
 | LLM: Qwen 2.5 1.5B (offline) | Hailo-10H NPU + 8GB RAM | 20-35 tok/s | 0% |
@@ -399,9 +399,23 @@ vision_service/
 **config.yaml:**
 ```yaml
 camera:
-  sensor: "imx708"           # Camera Module 3 sensor
-  resolution: [640, 640]     # YOLO input size
-  framerate: 30
+  sensor: "imx708"                 # Camera Module 3 sensor
+  base_resolution: [640, 640]      # YOLO input size (always this for inference)
+  base_framerate: 30
+  dynamic_adjust:
+    enabled: true
+    check_interval: 0.5            # seconds between motion checks
+    motion_threshold: 30           # mean pixel diff to trigger "high motion"
+    motion_window: 5               # frames to average for smoothing
+    profiles:
+      low_motion:
+        resolution: [640, 640]
+        framerate: 30
+        label: "full quality"
+      high_motion:
+        resolution: [640, 320]
+        framerate: 60
+        label: "fast capture"
 detection:
   model: "yolov8n"           # yolov8n / yolov8s
   confidence: 0.5
@@ -440,9 +454,12 @@ class SharedDetectionBuffer:
 
 **Flow:**
 1. `detection_pipeline.py` runs on the Hailo-10H in a continuous thread
-2. Each frame: runs YOLO inference → stores results in `shared_buffer`
-3. Subscribes to `vision/query[` → captures one frame → runs VLM → publishes `vision/result`
-4. `visual_detect` tool handler reads `shared_buffer` instantly (no re-inference)
+2. Each frame: estimates motion via frame differencing (160×120 grayscale)
+3. Every 0.5s: if average motion > threshold → switches to 640×320 @ 60fps; else back to 640×640 @ 30fps
+4. Regardless of camera capture resolution, YOLO always runs inference at 640×640 (frame resized)
+5. Results stored in `shared_buffer` with current motion profile info
+6. Subscribes to `vision/query` → captures one frame → runs VLM → publishes `vision/result`
+7. `visual_detect` tool handler reads `shared_buffer` instantly (no re-inference)
 
 ---
 
@@ -736,11 +753,15 @@ The vision pipeline is **never interrupted** — it runs independently in its ow
 │  Vision Thread (started once, never stopped)                 │
 │                                                               │
 │  Loop:                                                        │
-│    1. Capture frame from Camera Module 3 @ 30 FPS            │
-│    2. Send frame to Hailo-10H YOLO pipeline                  │
-│    3. Receive detections from Hailo-10H (500+ FPS capability)│
-│    4. Store in SharedDetectionBuffer (thread-safe)           │
-│    5. Loop                                                   │
+│    1. Capture frame from Camera Module 3                      │
+│    2. Estimate motion (frame differencing @ 160×120 gray)     │
+│    3. Every 0.5s: switch profile based on motion score:       │
+│       Low motion  → 640×640 @ 30fps (full quality)           │
+│       High motion → 640×320 @ 60fps (fast capture)           │
+│    4. Resize frame to 640×640 for YOLO                        │
+│    5. Send to Hailo-10H YOLO pipeline (430+ FPS)             │
+│    6. Store in SharedDetectionBuffer (thread-safe)           │
+│    7. Loop                                                   │
 │                                                               │
 │  shared_buffer contents:                                      │
 │    {                                                          │
@@ -750,6 +771,8 @@ The vision pipeline is **never interrupted** — it runs independently in its ow
 │        {"class": "chair", "confidence": 0.87,                 │
 │         "bbox": [50, 300, 150, 450]}                          │
 │      ],                                                       │
+│      "profile": "high_motion",                                │
+│      "motion_score": 42.5,                                    │
 │      "timestamp": 1234567890.123,                             │
 │      "age_ms": 15                                             │
 │    }                                                          │
@@ -983,14 +1006,14 @@ python -m hailo_apps.python.gen_ai_apps.vlm_chat.vlm_chat --input usb
 
 | Task | Details | Owner |
 |------|---------|-------|
-| `detection_pipeline.py` | Continuous YOLO on Hailo-10H | TBD |
-| `shared_buffer.py` | Thread-safe detection storage | TBD |
+| `detection_pipeline.py` | Continuous YOLO on Hailo-10H + motion-based dynamic FPS/resolution | TBD |
+| `shared_buffer.py` | Thread-safe detection storage (includes motion profile) | TBD |
 | `vlm_engine.py` | Path A (Hailo VLM) implementation | TBD |
 | `vlm_engine.py` | Path B (Qwen2.5-VL) implementation | TBD |
 | `visual_detect` handler | Read shared_buffer → return to LLM | TBD |
 | `vlm_query` handler | Capture frame → run VLM → return to LLM | TBD |
 | Test: voice → "what do you see?" | End-to-end with VLM response | TBD |
-| Test: verify 30 FPS detection | Log FPS, confirm no frame drops | TBD |
+| Test: dynamic profile switch | Wave hand in front of camera → verify switch to 640×320 @ 60fps | TBD |
 
 **Deliverable:** Camera → YOLO (30 FPS) + VLM (on demand) → LLM tool calling.
 
