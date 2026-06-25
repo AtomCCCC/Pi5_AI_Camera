@@ -1,6 +1,6 @@
 # GPIO Service
 
-Controls physical outputs: servo motors, GPIO digital pins, and display screen.
+Controls physical outputs: servo motors, GPIO digital pins, and display screen. All commands arrive via MQTT from the LLM Orchestrator.
 
 ## Files
 
@@ -12,13 +12,60 @@ Controls physical outputs: servo motors, GPIO digital pins, and display screen.
 | `pin_config.py` | pigpio daemon manager, digital pin read/write |
 | `config.yaml` | Servo pins/pulse ranges, screen type/dimensions |
 
+## Processing Flow
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                       GPIO SERVICE METHODOLOGY                            │
+│                                                                           │
+│  ┌────────────────┐                                                       │
+│  │ gpio/command   │  {type: "servo"|"gpio"|"screen", ...params}           │
+│  │ arrives via    │                                                       │
+│  │ MQTT           │                                                       │
+│  └────────┬───────┘                                                       │
+│           ▼                                                               │
+│  ┌────────────────────────────────────────────────────────────────────┐   │
+│  │                     COMMAND DISPATCHER                              │   │
+│  │                                                                     │   │
+│  │  ┌──────────┐    ┌──────────┐    ┌──────────┐                      │   │
+│  │  │ type ==  │    │ type ==  │    │ type ==  │                      │   │
+│  │  │ "servo"  │    │ "gpio"   │    │ "screen" │                      │   │
+│  │  └────┬─────┘    └────┬─────┘    └────┬─────┘                      │   │
+│  │       ▼               ▼               ▼                             │   │
+│  │  ┌──────────┐   ┌──────────┐   ┌──────────┐                        │   │
+│  │  │ Servo    │   │ Pin      │   │ Screen   │                        │   │
+│  │  │Controller│   │Config    │   │Driver    │                        │   │
+│  │  │          │   │          │   │          │                        │   │
+│  │  │ set_angle│   │ write_pin│   │ display  │                        │   │
+│  │  │ (1..180°)│   │ (HIGH/   │   │ (text,   │                        │   │
+│  │  │          │   │  LOW)    │   │  clear)  │                        │   │
+│  │  └────┬─────┘   └────┬─────┘   └────┬─────┘                        │   │
+│  └───────┼──────────────┼──────────────┼──────────────────────────────┘   │
+│          ▼              ▼              ▼                                   │
+│  ┌──────────────┐ ┌──────────┐ ┌──────────────┐                           │
+│  │ Servo 1 (BCM │ │ GPIO pin │ │ OLED Display │                           │
+│  │ 12) or       │ │ (3.3V /  │ │ via I2C      │                           │
+│  │ Servo 2 (BCM │ │ 0V)      │ │ 0x3C         │                           │
+│  │ 13)          │ │          │ │              │                           │
+│  └──────────────┘ └──────────┘ └──────────────┘                           │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+### Step-by-Step
+
+1. **Command Arrives** — `main.py` receives `{type, ...params, session_id}` on `gpio/command`.
+2. **Dispatch** — The `type` field determines which hardware to control:
+   - **`servo`** → `servo_controller.py` converts angle (0-180°) to pulse width via linear interpolation (`min_pulse + range * angle / 180`). The pigpio library sets hardware PWM on BCM 12 or 13.
+   - **`gpio`** → `pin_config.py` writes `HIGH (True)` or `LOW (False)` to the specified BCM pin via pigpio.
+   - **`screen`** → `screen_driver.py` writes text to the display. Currently supports SSD1306 OLED via I2C; TFT/HDMI/LCD are pluggable.
+
 ## MQTT
 
-| Direction | Topic | Payload |
-|-----------|-------|---------|
-| Subscribe | `gpio/command` | `{type: "servo"|"gpio"|"screen", ...params, session_id}` |
+| Direction | Topic | Payload | When |
+|-----------|-------|---------|------|
+| Subscribe | `gpio/command` | `{type: "servo"|"gpio"|"screen", ...params, session_id}` | LLM calls a tool |
 
-### Command Types
+### Command Payloads
 
 **servo** — `{type: "servo", servo: 1|2, angle: 0-180}`
 **gpio** — `{type: "gpio", pin: 17, value: true|false}`
