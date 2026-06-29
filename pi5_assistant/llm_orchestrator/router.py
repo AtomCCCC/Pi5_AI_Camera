@@ -1,7 +1,8 @@
 """Connectivity router — detects internet and selects the appropriate LLM backend.
 
 Online  → DeepSeek V4 API
-Offline → Qwen 2.5 via Ollama on Hailo-10H
+Offline → Hailo-10H NPU (Qwen 2.5 1.5B, 0% CPU)
+No NPU  → Ollama CPU (Qwen 2.5 3B)
 """
 
 import socket
@@ -35,6 +36,10 @@ class Router:
         if not self.config["router"]["prefer_online"]:
             return False
         return self.get_online_status()
+
+    def should_use_hailo(self) -> bool:
+        """Returns True if Hailo NPU is configured and available."""
+        return bool(self.config.get("hailo", {}).get("hef_path"))
 
     @staticmethod
     def _ping() -> bool:

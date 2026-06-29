@@ -1,7 +1,7 @@
 """LLM Orchestrator — main entry point.
 
 Subscribes to command/in for user text.
-Selects LLM backend (DeepSeek online / Qwen offline).
+Selects LLM backend (DeepSeek online / Hailo NPU / Ollama CPU).
 Executes any tool calls the LLM requests.
 Publishes final response to response/out.
 """
@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from pi5_assistant.mqtt_client import MQTTClient
 from llm_orchestrator.router import Router
 from llm_orchestrator.deepseek_client import DeepSeekClient
+from llm_orchestrator.hailo_client import HailoClient
 from llm_orchestrator.ollama_client import OllamaClient
 from llm_orchestrator.tool_definitions import TOOLS
 from llm_orchestrator.tool_handlers.visual_detect import VisualDetectHandler
@@ -38,7 +39,6 @@ class LLMOrchestrator:
                                self.cfg["mqtt"]["port"])
         self.router = Router(self.cfg)
 
-        # Tool handlers
         self.tool_handlers = {
             "visual_detect": VisualDetectHandler(self.mqtt),
             "vlm_query": VLMQueryHandler(self.mqtt),
@@ -48,13 +48,15 @@ class LLMOrchestrator:
         }
 
     def _get_llm(self):
-        """Get the appropriate LLM client based on connectivity."""
+        """Get the appropriate LLM client based on connectivity and hardware."""
         if self.router.should_use_online():
             logger.info("Using DeepSeek V4 (online)")
             return DeepSeekClient(self.cfg)
-        else:
-            logger.info("Using Qwen via Ollama (offline)")
-            return OllamaClient(self.cfg)
+        elif self.router.should_use_hailo():
+            logger.info("Using Qwen on Hailo-10H NPU")
+            return HailoClient(self.cfg)
+        logger.info("Using Qwen via Ollama (CPU fallback)")
+        return OllamaClient(self.cfg)
 
     def run(self):
         self.mqtt.subscribe(self.cfg["mqtt"]["topic_command_in"], self._on_command)
@@ -75,16 +77,13 @@ class LLMOrchestrator:
 
         print(f"[LLM] [{session_id}] Processing: {text[:80]}...")
 
-        # Build messages
         messages = [
             {"role": "system", "content": self.cfg["system_prompt"]},
             {"role": "user", "content": text},
         ]
 
-        # Get LLM
         llm = self._get_llm()
 
-        # Call LLM with tools
         try:
             response = llm.chat(messages, tools=TOOLS)
         except Exception as e:
@@ -95,7 +94,6 @@ class LLMOrchestrator:
             })
             return
 
-        # Handle tool calls
         while llm.is_tool_call(response):
             messages.append(response.choices[0].message if hasattr(response, 'choices') else response.get("message", {}))
 
@@ -108,23 +106,21 @@ class LLMOrchestrator:
 
                 handler = self.tool_handlers.get(name)
                 if handler:
-                    logger.info(f"  → Tool: {name}({args})")
+                    logger.info(f"  \u2192 Tool: {name}({args})")
                     result = handler.handle(args, session_id)
                 else:
                     result = json.dumps({"error": f"Unknown tool: {name}"})
 
                 messages.append(llm.build_tool_result_message(tool_id, result))
 
-            # Second LLM call with tool results
             try:
                 response = llm.chat(messages, tools=TOOLS)
             except Exception as e:
                 logger.error(f"LLM follow-up call failed: {e}")
                 break
 
-        # Extract final text response
         final_text = llm.get_text(response)
-        print(f"[LLM] [{session_id}] → {final_text[:80]}...")
+        print(f"[LLM] [{session_id}] \u2192 {final_text[:80]}...")
 
         self.mqtt.publish(self.cfg["mqtt"]["topic_response_out"], {
             "text": final_text,
@@ -132,6 +128,8 @@ class LLMOrchestrator:
         })
 
     def stop(self):
+        if hasattr(self, '_llm'):
+            self._llm.stop()
         self.mqtt.stop()
 
 

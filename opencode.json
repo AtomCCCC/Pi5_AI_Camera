@@ -1,0 +1,9 @@
+{
+  "name": "Pi5 AI Camera",
+  "remote": {
+    "host": "100.66.5.5",
+    "user": "userpi",
+    "identityFile": "/Users/zichangyuan/.ssh/pi_ai",
+    "workdir": "/home/userpi/pi5_assistant"
+  }
+}

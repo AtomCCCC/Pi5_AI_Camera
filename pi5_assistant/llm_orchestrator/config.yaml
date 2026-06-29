@@ -7,10 +7,15 @@ deepseek:
   base_url: "https://api.deepseek.com"
   timeout: 30
 
+hailo:
+  hef_path: "/usr/local/hailo/resources/models/hailo10h/Qwen2.5-1.5B-Instruct.hef"
+  max_tokens: 200
+  temperature: 0.1
+
 ollama:
-  model: "qwen2.5:1.5b"             # Runs on Hailo-10H NPU
+  model: "qwen2.5:3b"               # CPU fallback model
   base_url: "http://localhost:11434"
-  fallback_model: "qwen2.5:3b"      # CPU fallback if Hailo unavailable
+  fallback_model: "qwen2.5:3b"
 
 router:
   connectivity_check_interval: 30   # seconds
@@ -34,3 +39,6 @@ mqtt:
   topic_vision_query: "vision/query"
   topic_vision_result: "vision/result"
   topic_gpio_command: "gpio/command"
+
+  topic_vision_detect: "vision/detect"
+  topic_vision_detect_result: "vision/detect_result"
