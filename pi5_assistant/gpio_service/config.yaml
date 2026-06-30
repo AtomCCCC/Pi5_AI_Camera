@@ -8,12 +8,12 @@ mqtt:
 
 servo:
   servo1:
-    pin: 12          # BCM GPIO pin for servo 1
+    pin: 18          # BCM GPIO 18 (Pin 12) - 实际接线
     min_pulse: 500   # microseconds (0°)
     max_pulse: 2500  # microseconds (180°)
     freq: 50         # PWM frequency in Hz
   servo2:
-    pin: 13
+    pin: 12          # BCM GPIO 12 (Pin 32) - 实际接线
     min_pulse: 500
     max_pulse: 2500
     freq: 50

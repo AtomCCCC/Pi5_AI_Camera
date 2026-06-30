@@ -18,6 +18,7 @@ import threading
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from pi5_assistant.mqtt_client import MQTTClient
 from gpio_service.servo_controller import ServoController
+from gpio_service.pin_config import PinConfig
 from gpio_service.screen_driver import ScreenDriver
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,8 @@ class GPIOService:
             self.cfg = yaml.safe_load(f)
 
         self.mqtt = MQTTClient("gpio", self.cfg["mqtt"]["broker"],
-                               self.cfg["mqtt"]["port"])
+                                self.cfg["mqtt"]["port"])
+        self.pins = PinConfig()
         self.servo = ServoController(self.cfg)
         self.screen = ScreenDriver(self.cfg)
 
@@ -61,7 +63,7 @@ class GPIOService:
         elif cmd_type == "gpio":
             pin = payload["pin"]
             value = payload["value"]
-            self.servo.pins.write_pin(pin, value)
+            self.pins.write_pin(pin, value)
 
         elif cmd_type == "screen":
             content = payload.get("content", "")
@@ -77,6 +79,7 @@ class GPIOService:
 
     def stop(self):
         self.servo.cleanup()
+        self.pins.stop()
         self.screen.cleanup()
         self.mqtt.stop()
 

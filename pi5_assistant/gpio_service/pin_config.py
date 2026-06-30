@@ -1,62 +1,52 @@
-"""GPIO pin configuration and pigpio interface.
+"""GPIO pin configuration for Pi 5.
 
-Manages pigpio connection for hardware PWM and digital I/O.
+Uses gpiozero with lgpio backend for GPIO and hardware PWM on Pi 5.
 """
 
 import logging
-import subprocess
 
 logger = logging.getLogger(__name__)
 
 
 class PinConfig:
-    """pigpio-based GPIO control for servos and digital pins."""
+    """gpiozero-based GPIO control for Pi 5."""
 
     def __init__(self):
-        self._ensure_pigpiod()
-        import pigpio
-        self.pi = pigpio.pi()
-        if not self.pi.connected:
-            raise RuntimeError("Could not connect to pigpio daemon")
-
-    def _ensure_pigpiod(self) -> None:
-        """Start pigpiod if it's not already running."""
+        self._ensure_lgpio()
+        from gpiozero import Device
+        from gpiozero.pins.lgpio import LGPIOFactory
         try:
-            result = subprocess.run(
-                ["pgrep", "pigpiod"],
-                capture_output=True,
-                timeout=5,
-            )
-            if result.returncode != 0:
-                subprocess.run(
-                    ["sudo", "pigpiod"],
-                    check=False,
-                    timeout=10,
-                )
-                logger.info("Started pigpiod daemon")
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            logger.warning("Could not start/check pigpiod")
+            Device.pin_factory = LGPIOFactory()
+            logger.info("GPIO: using lgpio pin factory")
+        except Exception as e:
+            logger.info(f"lgpio unavailable ({e}), using default pin factory")
 
-    def set_pwm(self, pin: int, freq: int) -> None:
-        """Configure a pin for hardware PWM."""
-        self.pi.set_mode(pin, pigpio.ALT0)
-        self.pi.set_PWM_frequency(pin, freq)
-        logger.debug(f"  PWM configured: pin={pin}, freq={freq}Hz")
-
-    def set_servo_pulsewidth(self, pin: int, pulsewidth: int) -> None:
-        """Set servo pulse width in microseconds (0 disables PWM)."""
-        self.pi.set_servo_pulsewidth(pin, pulsewidth)
+    def _ensure_lgpio(self) -> None:
+        """Verify lgpio is available."""
+        try:
+            import lgpio
+            logger.info(f"lgpio available: v{lgpio.get_module_version()}")
+        except ImportError:
+            logger.warning("lgpio not available, falling back to default")
 
     def write_pin(self, pin: int, value: bool) -> None:
         """Set a digital GPIO pin HIGH (True) or LOW (False)."""
-        self.pi.write(pin, 1 if value else 0)
+        from gpiozero import DigitalOutputDevice
+        dev = DigitalOutputDevice(pin, active_high=True)
+        if value:
+            dev.on()
+        else:
+            dev.off()
+        dev.close()
 
     def read_pin(self, pin: int) -> bool:
         """Read the current value of a digital GPIO pin."""
-        return bool(self.pi.read(pin))
+        from gpiozero import DigitalInputDevice
+        dev = DigitalInputDevice(pin)
+        val = dev.value
+        dev.close()
+        return bool(val)
 
     def stop(self) -> None:
-        """Disconnect from pigpio."""
-        if hasattr(self, 'pi'):
-            self.pi.stop()
-            logger.info("pigpio connection closed")
+        """Cleanup resources."""
+        pass
