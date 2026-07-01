@@ -1,8 +1,8 @@
 # Pi5 AI Camera — Complete Architecture Document
 
 > **Author:** AI-assisted design  
-> **Date:** 2026-06-25  
-> **Status:** Planning phase — for team review  
+> **Date:** 2026-07-01  
+> **Status:** Development — LLM backends + GPIO tested on hardware  
 > **Hardware:** Pi 5 (8GB) + AI HAT+ 2 (Hailo-10H, 40 TOPS) + Camera Module 3
 
 ---
@@ -26,6 +26,7 @@
 10. [Implementation Roadmap](#10-implementation-roadmap)
 11. [Full Data Flow Example](#11-full-data-flow-example)
 12. [Team Discussion Questions](#12-team-discussion-questions)
+13. [Quick Start / Setup Guide](#13-quick-start--setup-guide)
 
 ---
 
@@ -1162,3 +1163,213 @@ Total latency (estimated): ~2-4 seconds with DeepSeek, ~8-15 seconds offline.
 - **Must have:** Active Cooler on Pi 5, heatsink on Hailo-10H
 - **Nice to have:** Enclosure with fan cutout, ventilation for camera
 - Consider: USB ports accessible for mic/speaker, camera mount position
+
+---
+
+## 13. Quick Start / Setup Guide
+
+> **Status:** Updated 2026-07-01 — includes Hailo NPU proxy, Pi 5 GPIO (kernel PWM), and LLM backend configuration.
+
+### 13.1 System Dependencies
+
+```bash
+# Core system packages
+sudo apt update && sudo apt install -y \
+  mosquitto mosquitto-clients \
+  python3 python3-pip python3-venv \
+  python3-gpiozero python3-lgpio \
+  python3-yaml
+
+# Ollama (CPU inference)
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull qwen2.5:3b
+ollama serve  # Starts Ollama on port 11434
+
+# Hailo-10H drivers (already installed via apt, verify with):
+hailortcli fw-control identify
+# Expected: Firmware Version: 5.1.1, Device Architecture: HAILO10H
+```
+
+### 13.2 Python Virtual Environment
+
+```bash
+cd ~/Desktop/MyProject/Pi5_AI_Camera
+python3 -m venv .venv --system-site-packages
+source .venv/bin/activate
+pip install openai pyyaml paho-mqtt requests
+```
+
+> **Important:** Use `--system-site-packages` so the venv can access system-installed `hailo_platform`, `gpiozero`, and `lgpio`.
+
+### 13.3 hailo-apps (Required for HailoClient / NPU Inference)
+
+```bash
+cd ~
+git clone https://github.com/hailo-ai/hailo-apps.git
+cd hailo-apps
+python3 -m venv venv_hailo_apps --system-site-packages
+source venv_hailo_apps/bin/activate
+pip install -e .
+
+# Verify the model is available:
+ls /usr/local/hailo/resources/models/hailo10h/Qwen2.5-1.5B-Instruct.hef
+```
+
+### 13.4 Environment Variables
+
+```bash
+# Add to ~/.bashrc
+export DEEPSEEK_API_KEY="sk-..."
+export PYTHONPATH="$HOME:/home/userpi/hailo-apps:$PYTHONPATH"
+```
+
+### 13.5 Start All Services
+
+#### Mosquitto (MQTT Broker)
+
+```bash
+sudo systemctl enable mosquitto
+sudo systemctl start mosquitto
+```
+
+#### Hailo NPU Ollama Proxy (Port 8000)
+
+```bash
+# Copy the systemd service file (already in repo):
+sudo cp pi5_assistant/llm_orchestrator/hailo-ollama-proxy.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable hailo-ollama-proxy
+sudo systemctl start hailo-ollama-proxy
+
+# Verify:
+curl -X POST http://localhost:8000/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen2.5:1.5b","messages":[{"role":"user","content":"Hi"}],"stream":false}'
+```
+
+#### Individual Services
+
+```bash
+# Each in a separate terminal:
+cd ~/Desktop/MyProject/Pi5_AI_Camera
+source .venv/bin/activate
+
+# Voice Service
+python3 pi5_assistant/voice_service/main.py &
+
+# Vision Service
+python3 pi5_assistant/vision_service/main.py &
+
+# LLM Orchestrator
+python3 pi5_assistant/llm_orchestrator/main.py &
+
+# GPIO Service
+python3 pi5_assistant/gpio_service/main.py &
+
+# Session Manager
+python3 pi5_assistant/session_manager/main.py &
+```
+
+### 13.6 Servo Wiring Reference
+
+| Servo | Wire Color | Pi 5 Pin | BCM GPIO | PWM Channel |
+|-------|------------|----------|----------|-------------|
+| Servo 1 | Red (VCC) | Pin 2 (5V) | — | — |
+|  | Black/Brown (GND) | Pin 6 (GND) | — | — |
+|  | Yellow/Orange (Signal) | Pin 12 | GPIO 18 | pwm2 |
+| Servo 2 | Red (VCC) | Pin 4 (5V) | — | — |
+|  | Black/Brown (GND) | Pin 39 (GND) | — | — |
+|  | Yellow/Orange (Signal) | Pin 32 | GPIO 12 | pwm0 |
+
+> **Note:** For production use, power servos from an external 5V PSU, not from Pi 5V pins.
+
+### 13.7 Test Each LLM Backend
+
+#### DeepSeek (Online)
+
+```bash
+cd ~/Desktop/MyProject/Pi5_AI_Camera && source .venv/bin/activate
+python3 << 'EOF'
+import sys; sys.path.insert(0, "pi5_assistant")
+from llm_orchestrator.deepseek_client import DeepSeekClient
+c = DeepSeekClient({"deepseek": {"api_key_env": "DEEPSEEK_API_KEY", "model": "deepseek-v4-flash", "base_url": "https://api.deepseek.com", "timeout": 30}})
+print(c.get_text(c.chat([{"role": "user", "content": "Say hello"}])))
+EOF
+```
+
+#### Hailo NPU (Native, via hailo_platform.genai.LLM)
+
+```bash
+source ~/hailo-apps/venv_hailo_apps/bin/activate
+python3 << 'EOF'
+import sys; sys.path.insert(0, "$HOME/Desktop/MyProject/Pi5_AI_Camera/pi5_assistant")
+import site; site.addsitedir("$HOME/hailo-apps/venv_hailo_apps/lib/python3.13/site-packages")
+from llm_orchestrator.hailo_client import HailoClient
+c = HailoClient({"hailo": {"hef_path": "/usr/local/hailo/resources/models/hailo10h/Qwen2.5-1.5B-Instruct.hef", "max_tokens": 100, "temperature": 0.1}})
+print(c.get_text(c.chat([{"role": "user", "content": "Say hello"}])))
+c.stop()
+EOF
+```
+
+#### Ollama via NPU Proxy (Port 8000, NPU for chat, CPU for tools)
+
+```bash
+cd ~/Desktop/MyProject/Pi5_AI_Camera && source .venv/bin/activate
+python3 << 'EOF'
+import sys; sys.path.insert(0, "pi5_assistant")
+from llm_orchestrator.ollama_client import OllamaClient
+import yaml
+with open("pi5_assistant/llm_orchestrator/config.yaml") as f:
+    cfg = yaml.safe_load(f)
+c = OllamaClient(cfg)
+print(c.get_text(c.chat([{"role": "user", "content": "Say hello"}])))
+EOF
+```
+
+### 13.8 Test Servos
+
+```bash
+cd ~/Desktop/MyProject/Pi5_AI_Camera && source .venv/bin/activate
+python3 << 'EOF'
+import sys; sys.path.insert(0, "pi5_assistant")
+import yaml
+with open("pi5_assistant/gpio_service/config.yaml") as f:
+    cfg = yaml.safe_load(f)
+from gpio_service.servo_controller import ServoController
+import time
+sc = ServoController(cfg)
+sc.set_angle(1, 0); sc.set_angle(2, 0); time.sleep(1)
+sc.set_angle(1, 180); sc.set_angle(2, 180); time.sleep(1)
+sc.set_angle(1, 90); sc.set_angle(2, 90)
+sc.cleanup()
+EOF
+```
+
+### 13.9 Test Full Pipeline (Voice → LLM → Response)
+
+```bash
+# Simulate a voice command via MQTT:
+mosquitto_pub -t 'command/in' -m '{"text":"你好，介绍一下你自己","session_id":"test"}'
+
+# Watch the response:
+mosquitto_sub -t 'response/out'
+```
+
+### 13.10 LLM Backend Selection Logic
+
+```
+Router (router.py):
+  prefer_online=true & internet available  → DeepSeek V4 Flash (cloud)
+  prefer_online=false & HEF path configured → HailoClient (NPU native, no tools)
+  prefer_online=false & proxy reachable    → OllamaClient → NPU proxy :8000
+                                              ├─ Plain chat → NPU
+                                              └─ Tool calls → CPU Ollama :11434
+  fallback                                 → OllamaClient → CPU Ollama :11434
+```
+
+| Backend | Inference | CPU | Tools | Speed | Network |
+|---------|----------|-----|-------|-------|---------|
+| DeepSeek | Cloud GPU | 0% | ✅ | Fast | Required |
+| HailoClient (NPU) | Hailo-10H | 0% | ❌ | Medium | None |
+| Ollama → NPU Proxy | Hailo-10H / CPU | Low | ✅ | Medium | None |
+| Ollama → CPU | Pi 5 CPU | High | ✅ | Slow | None |

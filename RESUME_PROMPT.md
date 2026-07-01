@@ -7,68 +7,68 @@ Copy and paste the block below to resume work exactly where we left off.
 ```
 You are resuming work on a Raspberry Pi 5 AI Camera project.
 
-## Project
+## Project Status (Updated 2026-07-01)
 Pi5 AI Camera — voice-interactive AI assistant for Raspberry Pi 5 (8GB)
 with Hailo-10H AI HAT+ 2 (40 TOPS, 8GB dedicated RAM) and Camera Module 3.
 
 GitHub: https://github.com/AtomCCCC/Pi5_AI_Camera
-Local:  /home/atomcccc/Desktop/Opencode/
+Pi path: /home/userpi/Desktop/MyProject/Pi5_AI_Camera/
+Tailscale: pi5@100.66.5.5 (SSH key: ~/.ssh/pi_ai)
+Pi sudo: userpi/1
 
-## What Has Been Built (all 6 services, all files written)
+## Completed (as of 2026-07-01)
+- ✅ DeepSeek API tested — working with tool calls
+- ✅ Hailo-10H NPU verified — firmware 5.1.1, /dev/hailo0
+- ✅ hailo-apps installed (~/hailo-apps/venv_hailo_apps with --system-site-packages)
+- ✅ HailoClient created — native NPU inference (0% CPU, no tool calling)
+- ✅ hailo_ollama_proxy.py — HTTP proxy on port 8000:
+    - Plain chat → NPU, tool calls → CPU Ollama :11434
+    - systemd service: hailo-ollama-proxy (enabled, auto-start)
+- ✅ OllamaClient updated — routes through NPU proxy, auto-fallback to CPU
+- ✅ Router updated — DeepSeek / Hailo NPU / Ollama proxy triage
+- ✅ GPIO service rewritten for Pi 5 (kernel PWM via /sys/class/pwm/pwmchip0, no pigpio)
+- ✅ Servos tested — GPIO18 (pwm2, Pin12), GPIO12 (pwm0, Pin32) with hardware PWM
+- ✅ Tool definitions fixed — added "type":"function" + "function":{} wrapper
+- ✅ README.md updated — added Section 13 Quick Start / Setup Guide
+- ✅ All changes committed and pushed to GitHub (main branch)
 
-Root:
-- README.md — full architecture document (12 sections)
-- pi5_assistant/README.md — service overview, structure, tech stack, MQTT topic map
-- RESUME_PROMPT.md — this file
-- .gitignore
+## Architecture Decisions (updated)
+- 3 LLM backends: DeepSeek (online), HailoClient (NPU native), OllamaClient (NPU proxy :8000)
+- GPIO: kernel PWM sysfs (no pigpio on Debian 13 Pi 5)
+- Servos: GPIO18=servo1, GPIO12=servo2, hardware PWM via pwmchip0
+- NPU Proxy: port 8000, wraps hailo_platform.genai.LLM as Ollama-compatible API
+- MQTT: Mosquitto on localhost:1883, 5 services
 
-Shared package (pi5_assistant/):
-- __init__.py
-- mqtt_client.py — MQTT wrapper with auto-JSON pub/sub
-
-Voice Service (voice_service/):
-- main.py, wake_detector.py, stt_engine.py, tts_engine.py, config.yaml, README.md
-
-Vision Service (vision_service/):
-- main.py, detection_pipeline.py, vlm_engine.py, shared_buffer.py, config.yaml, README.md
-- Dynamic FPS/resolution: motion differencing → switches between 640×640@30fps (low motion)
-  and 640×320@60fps (high motion). YOLO always runs at 640×640 regardless.
-
-LLM Orchestrator (llm_orchestrator/):
-- main.py, deepseek_client.py, ollama_client.py, router.py, tool_definitions.py, config.yaml, README.md
-- tool_handlers/: visual_detect.py, vlm_query.py, servo_write.py, gpio_write.py, screen_display.py
-
-GPIO Service (gpio_service/):
-- main.py, servo_controller.py, screen_driver.py, pin_config.py, config.yaml, README.md
-
-Session Manager (session_manager/):
-- main.py, conversation_store.py, interrupt_handler.py, config.yaml, README.md
-
-## Architecture Decisions (locked)
-- 5 independent services communicating via MQTT (Mosquitto)
-- LLM: DeepSeek V4 Flash (online) / Qwen 2.5 1.5B on Hailo (offline), auto-routed by router.py
-- Vision: continuous YOLO background thread + shared buffer (no re-inference on tool calls)
-- Voice interrupt: new wake word → kill TTS → new session
-- STT: Whisper.cpp / TTS: Piper (local) or ElevenLabs (cloud)
-- Servos: hardware PWM via pigpio on BCM 12/13
-- Session: single-turn per voice command (simplest start)
-- Camera Module 3: dynamic FPS/resolution by motion detection
-
-## Open Decisions (needs team discussion)
-1. VLM path: Hailo VLM (Path A, fast) vs Qwen2.5-VL-3B on CPU (Path B, slower but open)
-2. Screen type: I2C OLED (SSD1306) / SPI TFT (ILI9341) / HDMI / Character LCD
+## Open Decisions
+1. VLM path: Hailo VLM (Path A, fast) vs Qwen2.5-VL-3B on CPU (Path B, slower)
+2. Screen type: TBD
+3. hailo-ollama binary — needs manual download from Hailo developer zone
 
 ## Next Steps
-1. Create requirements.txt with all Python dependencies
-2. Create run_all.sh / systemd service files for auto-start
-3. Phase 1 implementation: OS setup, Hailo-10H driver install, YOLO test, Mosquitto setup
-4. Phase 2: LLM orchestration end-to-end testing
-5. Phase 3: Voice pipeline integration
-6. Phase 4: Vision pipeline + dynamic FPS testing
-7. Phase 5: GPIO hardware integration
-8. Phase 6: Full integration, thermal testing, systemd units
+1. Test Vision Service with camera
+2. Test Voice Service with STT/TTS
+3. Test Session Manager
+4. Full MQTT end-to-end test
+5. Voice interrupt mechanism
+6. Thermal testing (heat generation from NPU)
+7. Create run_all.sh / systemd units for remaining services
+
+## File Changes Since Initial Clone
+- NEW: pi5_assistant/llm_orchestrator/hailo_client.py
+- NEW: pi5_assistant/llm_orchestrator/hailo_ollama_proxy.py
+- NEW: opencode.json
+- MODIFIED: pi5_assistant/llm_orchestrator/tool_definitions.py (fixed format)
+- MODIFIED: pi5_assistant/llm_orchestrator/ollama_client.py (NPU proxy routing)
+- MODIFIED: pi5_assistant/llm_orchestrator/router.py (added should_use_hailo)
+- MODIFIED: pi5_assistant/llm_orchestrator/main.py (HailoClient import, triage)
+- MODIFIED: pi5_assistant/llm_orchestrator/config.yaml (hailo section, proxy URL)
+- MODIFIED: pi5_assistant/gpio_service/servo_controller.py (kernel PWM rewrite)
+- MODIFIED: pi5_assistant/gpio_service/pin_config.py (gpiozero+lgpio rewrite)
+- MODIFIED: pi5_assistant/gpio_service/main.py (PinConfig fix)
+- MODIFIED: pi5_assistant/gpio_service/config.yaml (pin 18/12 mapping)
+- MODIFIED: README.md (Section 13 Quick Start, status update)
 
 ## Credentials (DO NOT commit)
-- GitHub token is in /home/atomcccc/Desktop/api_key.txt
-- DEEPSEEK_API_KEY needed as env var at runtime
+- DEEPSEEK_API_KEY: sk-80c4361aa25443bd83af2eb63a3f12cc
+- GitHub token: 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
 ```
