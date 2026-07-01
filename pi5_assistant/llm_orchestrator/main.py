@@ -1,7 +1,7 @@
 """LLM Orchestrator — main entry point.
 
 Subscribes to command/in for user text.
-Selects LLM backend (DeepSeek online / Hailo NPU / Ollama CPU).
+Selects LLM backend (DeepSeek online / Ollama offline via NPU proxy).
 Executes any tool calls the LLM requests.
 Publishes final response to response/out.
 """
@@ -16,7 +16,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from pi5_assistant.mqtt_client import MQTTClient
 from llm_orchestrator.router import Router
 from llm_orchestrator.deepseek_client import DeepSeekClient
-from llm_orchestrator.hailo_client import HailoClient
 from llm_orchestrator.ollama_client import OllamaClient
 from llm_orchestrator.tool_definitions import TOOLS
 from llm_orchestrator.tool_handlers.visual_detect import VisualDetectHandler
@@ -48,14 +47,15 @@ class LLMOrchestrator:
         }
 
     def _get_llm(self):
-        """Get the appropriate LLM client based on connectivity and hardware."""
+        """Get the appropriate LLM client based on connectivity.
+
+        Online  → DeepSeek V4 API (full tool calling)
+        Offline → OllamaClient → NPU proxy :8000 → NPU for chat, CPU fallback for tools
+        """
         if self.router.should_use_online():
             logger.info("Using DeepSeek V4 (online)")
             return DeepSeekClient(self.cfg)
-        elif self.router.should_use_hailo():
-            logger.info("Using Qwen on Hailo-10H NPU")
-            return HailoClient(self.cfg)
-        logger.info("Using Qwen via Ollama (CPU fallback)")
+        logger.info("Using Ollama via NPU proxy")
         return OllamaClient(self.cfg)
 
     def run(self):

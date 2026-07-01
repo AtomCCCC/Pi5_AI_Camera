@@ -7,11 +7,6 @@ deepseek:
   base_url: "https://api.deepseek.com"
   timeout: 30
 
-hailo:
-  hef_path: "/usr/local/hailo/resources/models/hailo10h/Qwen2.5-1.5B-Instruct.hef"
-  max_tokens: 200
-  temperature: 0.1
-
 ollama:
   model: "qwen2.5:1.5b"             # Runs via NPU proxy on 8000
   base_url: "http://localhost:8000"  # Hailo Ollama proxy (NPU)

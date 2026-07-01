@@ -64,9 +64,9 @@ pi5_assistant/
 │
 ├── gpio_service/             # Physical outputs
 │   ├── main.py               # Entry point
-│   ├── servo_controller.py   # pigpio hardware PWM (BCM 12, 13)
-│   ├── screen_driver.py      # OLED / TFT / HDMI / LCD abstraction
-│   ├── pin_config.py         # pigpio daemon manager
+│   ├── servo_controller.py   # Kernel PWM (GPIO 18→pwm2, GPIO 12→pwm0)
+│   ├── screen_driver.py       # OLED / TFT / HDMI / LCD abstraction
+│   ├── pin_config.py          # gpiozero + lgpio digital I/O
 │   └── config.yaml
 │
 ├── session_manager/          # Session lifecycle
@@ -95,7 +95,7 @@ pi5_assistant/
 | **Wake Word** | Porcupine / custom |
 | **STT** | Whisper.cpp |
 | **TTS** | Piper TTS / ElevenLabs API |
-| **Servo PWM** | pigpio (hardware PWM, BCM 12/13) |
+| **Servo PWM** | Kernel PWM via `/sys/class/pwm/pwmchip0` (GPIO18/GPIO12) |
 | **Screen** | SSD1306 OLED (I2C) / TFT / HDMI (TBD) |
 
 ## Quick Start

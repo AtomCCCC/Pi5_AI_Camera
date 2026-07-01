@@ -545,51 +545,44 @@ gpio_service/
 **config.yaml:**
 ```yaml
 servos:
-  servo_1:
-    pin: 12               # BCM GPIO 12 (PWM0)
-    min_angle: 0
-    max_angle: 180
-    min_pulse_us: 500     # Standard servo pulse range
-    max_pulse_us: 2500
-  servo_2:
-    pin: 13               # BCM GPIO 13 (PWM1)
-    min_angle: 0
-    max_angle: 180
-    min_pulse_us: 500
-    max_pulse_us: 2500
-
-screen:
-  driver: "none"          # Options: "ssd1306", "hd44780", "tft", "hdmi", "none"
-  # I2C OLED
-  i2c_bus: 1
-  i2c_address: 0x3C
-  # SPI TFT
-  spi_bus: 0
-  spi_cs: 0
-  spi_dc: 24
-  # Character LCD
-  rs_pin: 17
-  e_pin: 18
-  data_pins: [22, 23, 24, 25]
+  servo1:
+    pin: 18          # BCM GPIO 18 (Pin 12) — hardware PWM pwm2
+    freq: 50
+  servo2:
+    pin: 12          # BCM GPIO 12 (Pin 32) — hardware PWM pwm0
+    freq: 50
 ```
+> **Pi 5 note:** Uses kernel PWM via `/sys/class/pwm/pwmchip0` instead of pigpio (not available on Debian 13). GPIO18→pwm2, GPIO12→pwm0.
 
-**`servo_controller.py` (using Pi 5 hardware PWM):**
+**`servo_controller.py` (Pi 5 kernel PWM):**
 
 ```python
-import pigpio  # PiGPIO daemon for hardware PWM
+# Pi 5 hardware PWM via sysfs — /sys/class/pwm/pwmchip0
+import os, time
+
+PWM_CHIP = "/sys/class/pwm/pwmchip0"
+PERIOD_NS = 20_000_000  # 20ms → 50Hz
+GPIO_TO_PWM = {18: 2, 12: 0}  # GPIO→PWM channel
 
 class ServoController:
     def __init__(self, config):
-        self.pi = pigpio.pi()
-        self.servos = config["servos"]
+        self._servos = {}
+        for name, cfg in config["servo"].items():
+            ch = GPIO_TO_PWM[cfg["pin"]]
+            if not os.path.exists(f"{PWM_CHIP}/pwm{ch}"):
+                with open(f"{PWM_CHIP}/export", "w") as f:
+                    f.write(str(ch))
+            with open(f"{PWM_CHIP}/pwm{ch}/period", "w") as f:
+                f.write(str(PERIOD_NS))
+            with open(f"{PWM_CHIP}/pwm{ch}/enable", "w") as f:
+                f.write("1")
+            self._servos[name] = ch
 
     def set_angle(self, servo_num, angle):
-        servo = self.servos[f"servo_{servo_num}"]
-        pulse = servo["min_pulse_us"] + (
-            angle / servo["max_angle"] * 
-            (servo["max_pulse_us"] - servo["min_pulse_us"])
-        )
-        self.pi.set_servo_pulsewidth(servo["pin"], pulse)
+        ch = self._servos[f"servo{servo_num}"]
+        pulse_ns = int(500_000 + (angle / 180.0) * 2_000_000)
+        with open(f"{PWM_CHIP}/pwm{ch}/duty_cycle", "w") as f:
+            f.write(str(pulse_ns))
 ```
 
 **`screen_driver.py` — Abstract Interface:**
@@ -1201,7 +1194,7 @@ pip install openai pyyaml paho-mqtt requests
 
 > **Important:** Use `--system-site-packages` so the venv can access system-installed `hailo_platform`, `gpiozero`, and `lgpio`.
 
-### 13.3 hailo-apps (Required for HailoClient / NPU Inference)
+### 13.3 hailo-apps (Required for NPU Inference)
 
 ```bash
 cd ~
@@ -1297,20 +1290,6 @@ print(c.get_text(c.chat([{"role": "user", "content": "Say hello"}])))
 EOF
 ```
 
-#### Hailo NPU (Native, via hailo_platform.genai.LLM)
-
-```bash
-source ~/hailo-apps/venv_hailo_apps/bin/activate
-python3 << 'EOF'
-import sys; sys.path.insert(0, "$HOME/Desktop/MyProject/Pi5_AI_Camera/pi5_assistant")
-import site; site.addsitedir("$HOME/hailo-apps/venv_hailo_apps/lib/python3.13/site-packages")
-from llm_orchestrator.hailo_client import HailoClient
-c = HailoClient({"hailo": {"hef_path": "/usr/local/hailo/resources/models/hailo10h/Qwen2.5-1.5B-Instruct.hef", "max_tokens": 100, "temperature": 0.1}})
-print(c.get_text(c.chat([{"role": "user", "content": "Say hello"}])))
-c.stop()
-EOF
-```
-
 #### Ollama via NPU Proxy (Port 8000, NPU for chat, CPU for tools)
 
 ```bash
@@ -1359,17 +1338,15 @@ mosquitto_sub -t 'response/out'
 
 ```
 Router (router.py):
-  prefer_online=true & internet available  → DeepSeek V4 Flash (cloud)
-  prefer_online=false & HEF path configured → HailoClient (NPU native, no tools)
-  prefer_online=false & proxy reachable    → OllamaClient → NPU proxy :8000
-                                              ├─ Plain chat → NPU
-                                              └─ Tool calls → CPU Ollama :11434
-  fallback                                 → OllamaClient → CPU Ollama :11434
+  prefer_online=true & internet available  → DeepSeek V4 Flash (cloud, full tool calling)
+  offline                                  → OllamaClient → NPU proxy :8000
+                                              ├─ Plain chat → Hailo-10H NPU (0% CPU)
+                                              └─ Tool calls → CPU Ollama :11434 (auto fallback)
+  proxy down                               → OllamaClient → CPU Ollama :11434 (direct)
 ```
 
 | Backend | Inference | CPU | Tools | Speed | Network |
 |---------|----------|-----|-------|-------|---------|
-| DeepSeek | Cloud GPU | 0% | ✅ | Fast | Required |
-| HailoClient (NPU) | Hailo-10H | 0% | ❌ | Medium | None |
+| DeepSeek V4 Flash | Cloud GPU | 0% | ✅ | Fast | Required |
 | Ollama → NPU Proxy | Hailo-10H / CPU | Low | ✅ | Medium | None |
-| Ollama → CPU | Pi 5 CPU | High | ✅ | Slow | None |
+| Ollama → CPU (fallback) | Pi 5 CPU | High | ✅ | Slow | None |
