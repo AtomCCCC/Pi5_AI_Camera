@@ -13,9 +13,10 @@ hailo:
   temperature: 0.1
 
 ollama:
-  model: "qwen2.5:3b"               # CPU fallback model
-  base_url: "http://localhost:11434"
-  fallback_model: "qwen2.5:3b"
+  model: "qwen2.5:1.5b"             # Runs via NPU proxy on 8000
+  base_url: "http://localhost:8000"  # Hailo Ollama proxy (NPU)
+  fallback_model: "qwen2.5:3b"      # CPU fallback via direct Ollama
+  fallback_url: "http://localhost:11434"  # Direct CPU Ollama
 
 router:
   connectivity_check_interval: 30   # seconds

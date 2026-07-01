@@ -1,7 +1,10 @@
-"""Ollama client for local Qwen inference on Hailo-10H.
+"""Ollama client with NPU proxy support.
 
-Qwen 2.5 1.5B runs at 20-35 tok/s on the Hailo-10H NPU.
-Falls back to Qwen 2.5 3B on CPU if Hailo is unavailable.
+Routes requests to Hailo NPU proxy (port 8000) by default.
+Proxy handles:
+  - Plain chat → NPU (0% CPU, 20-35 tok/s)
+  - Tool calls → CPU Ollama (localhost:11434)
+If proxy is down, falls back to direct CPU Ollama.
 """
 
 import json
@@ -12,16 +15,17 @@ logger = logging.getLogger(__name__)
 
 
 class OllamaClient:
-    """Client for local LLM via Ollama (Qwen on Hailo-10H)."""
+    """Client for local LLM via NPU proxy or CPU Ollama."""
 
     def __init__(self, config: dict):
         self.model = config["ollama"]["model"]
         self.base_url = config["ollama"]["base_url"]
         self.fallback_model = config["ollama"]["fallback_model"]
+        self.fallback_url = config["ollama"].get("fallback_url", "http://localhost:11434")
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None,
              tool_choice: str = "auto") -> dict:
-        """Send a chat completion request to local Ollama."""
+        """Send chat request — routes via NPU proxy or direct CPU Ollama."""
         payload = {
             "model": self.model,
             "messages": messages,
@@ -34,6 +38,7 @@ class OllamaClient:
         if tools:
             payload["tools"] = tools
 
+        # Try NPU proxy first
         try:
             resp = requests.post(
                 f"{self.base_url}/api/chat",
@@ -43,27 +48,29 @@ class OllamaClient:
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException as e:
-            logger.warning(f"Ollama error with {self.model}: {e}")
-            # Fallback to CPU model
-            if self.model != self.fallback_model:
-                logger.info(f"Falling back to {self.fallback_model}")
+            logger.warning(f"NPU proxy error: {e}")
+
+        # Fallback to direct CPU Ollama
+        logger.info("Falling back to CPU Ollama")
+        try:
+            if tools:
                 payload["model"] = self.fallback_model
-                resp = requests.post(
-                    f"{self.base_url}/api/chat",
-                    json=payload,
-                    timeout=120,
-                )
-                resp.raise_for_status()
-                return resp.json()
+            resp = requests.post(
+                f"{self.fallback_url}/api/chat",
+                json=payload,
+                timeout=120,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException as e:
+            logger.error(f"CPU Ollama error: {e}")
             raise
 
     def is_tool_call(self, response: dict) -> bool:
-        """Check if the response contains a tool call."""
         msg = response.get("message", {})
         return "tool_calls" in msg and msg["tool_calls"]
 
     def extract_tool_calls(self, response: dict) -> list[dict]:
-        """Extract tool calls from Ollama response."""
         msg = response.get("message", {})
         calls = []
         for tc in msg.get("tool_calls", []):
@@ -76,11 +83,9 @@ class OllamaClient:
         return calls
 
     def get_text(self, response: dict) -> str:
-        """Extract text content from Ollama response."""
         return response.get("message", {}).get("content", "")
 
     def build_tool_result_message(self, tool_call_id: str, result: str) -> dict:
-        """Build a tool result message for Ollama conversation."""
         return {
             "role": "tool",
             "content": result,
