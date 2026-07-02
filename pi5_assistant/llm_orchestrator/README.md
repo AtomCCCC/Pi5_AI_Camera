@@ -1,6 +1,6 @@
 # LLM Orchestrator
 
-Central AI reasoning engine — routes to DeepSeek V4 (online) or Qwen (offline), executes tool calls in a loop, and publishes the final text response.
+Central AI reasoning engine — routes to DeepSeek V4 (online) or Qwen via NPU proxy (offline), executes tool calls in a loop, and publishes the final text response.
 
 ## Files
 
@@ -8,8 +8,9 @@ Central AI reasoning engine — routes to DeepSeek V4 (online) or Qwen (offline)
 |------|------|
 | `main.py` | Entry point, tool loop, MQTT subscriber to `command/in` |
 | `deepseek_client.py` | DeepSeek V4 Flash/Pro API via OpenAI-compatible client |
-| `ollama_client.py` | Qwen 2.5 1.5B on Hailo-10H via Ollama (with CPU fallback) |
-| `router.py` | Pings `api.deepseek.com:443`, caches result for 30s, auto-switches backend |
+| `ollama_client.py` | Routes through NPU proxy :8000 (chat→NPU, tools→CPU), falls back to CPU Ollama :11434 |
+| `hailo_ollama_proxy.py` | HTTP proxy on port 8000 — Hailo-10H NPU for plain chat, CPU Ollama for tool calls |
+| `router.py` | Pings `api.deepseek.com:443`, caches result for 30s, auto-switches backend (online→DeepSeek, offline→OllamaClient) |
 | `tool_definitions.py` | 5 tool schemas in OpenAI JSON Schema format |
 | `tool_handlers/` | One file per tool — dispatches via MQTT to the right service |
 | `config.yaml` | API keys, model names, MQTT topics, system prompt |
@@ -26,7 +27,9 @@ Central AI reasoning engine — routes to DeepSeek V4 (online) or Qwen (offline)
 │             ▼                                                                │
 │  ┌──────────────────────┐                                                    │
 │  │ Router decides       │───── online? ───► DeepSeek V4 Flash API            │
-│  │                      │───── offline? ──► Qwen 2.5 1.5B on Hailo via Ollama│
+│  │                      │───── offline? ──► OllamaClient → NPU proxy :8000   │
+│  │                      │                    ├─ Plain chat → Hailo-10H NPU   │
+│  │                      │                    └─ Tool calls → CPU Ollama :11434│
 │  └──────────┬───────────┘                                                    │
 │             ▼                                                                │
 │  ┌──────────────────────────────────────────────────────────────┐           │
@@ -55,7 +58,7 @@ Central AI reasoning engine — routes to DeepSeek V4 (online) or Qwen (offline)
 ### Step-by-Step
 
 1. **Command Received** — `main.py` receives `{text, session_id}` from `command/in`.
-2. **Router Check** — `router.py` pings `api.deepseek.com:443`. If reachable → use DeepSeek V4 Flash (online, fast, cheap). If unreachable → use Qwen 2.5 1.5B on Hailo-10H via Ollama (offline fallback).
+2. **Router Check** — `router.py` pings `api.deepseek.com:443`. If reachable → use DeepSeek V4 Flash (online). If unreachable → use `OllamaClient` which routes through the NPU proxy (`:8000`). The proxy handles plain chat on Hailo-10H NPU (0% CPU) and automatically falls back to CPU Ollama (`:11434`) for tool calls.
 3. **First LLM Call** — Messages = `[system prompt, user text]` + `tools[]`. The LLM either returns text or a tool call.
 4. **Tool Loop** — If a tool call is returned:
    - The tool name + arguments are matched to a handler in `tool_handlers/`
@@ -87,6 +90,15 @@ Central AI reasoning engine — routes to DeepSeek V4 (online) or Qwen (offline)
 
 Edit `config.yaml` to:
 - Switch online model (`deepseek-v4-flash` vs `deepseek-v4-pro`)
-- Change offline model / fallback model
+- Change offline model / fallback model / proxy URL
 - Adjust connectivity check interval
 - Modify system prompt
+
+### NPU Proxy Note
+
+The `hailo_ollama_proxy.py` listens on port 8000 and wraps the Hailo-10H NPU LLM as an Ollama-compatible API. When tool calls are detected in the request, it proxies to CPU Ollama on port 11434 automatically. Run it as a systemd service:
+
+```bash
+sudo cp hailo-ollama-proxy.service /etc/systemd/system/
+sudo systemctl enable hailo-ollama-proxy && sudo systemctl start hailo-ollama-proxy
+```

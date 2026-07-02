@@ -2,7 +2,7 @@
 
 > **Author:** AI-assisted design  
 > **Date:** 2026-07-01  
-> **Status:** Development — LLM backends + GPIO tested on hardware  
+> **Status:** Development — LLM backends (DeepSeek + NPU proxy) + GPIO (kernel PWM) tested on hardware  
 > **Hardware:** Pi 5 (8GB) + AI HAT+ 2 (Hailo-10H, 40 TOPS) + Camera Module 3
 
 ---
@@ -37,7 +37,7 @@ This project turns a Raspberry Pi 5 into a **voice-interactive AI assistant** wi
 - **Real-time object detection** at 30+ FPS via the Hailo-10H NPU, with dynamic camera FPS/resolution adjustment based on motion
 - **Vision-language understanding** (two interchangeable paths)
 - **Voice control** with interrupt capability (new command cancels current action)
-- **LLM-powered reasoning** via DeepSeek V4 API (online) or local Qwen (offline)
+- **LLM-powered reasoning** via DeepSeek V4 API (online) or local Qwen via NPU proxy (offline, chat→NPU/tools→CPU)
 - **GPIO control** for 2 servo motors + an undecided screen
 - **Tool-calling pattern** — the LLM decides when to invoke vision, GPIO, or display functions
 - **Modular services** communicating via MQTT for team-based development
@@ -67,12 +67,11 @@ This project turns a Raspberry Pi 5 into a **voice-interactive AI assistant** wi
 |------|---------|-------------|----------|
 | YOLOv8n object detection (640×640) | Hailo-10H NPU | 430+ FPS (YOLO always @ 640×640, camera capture resized) | 0% |
 | YOLOv8s object detection (640×640) | Hailo-10H NPU | 500+ FPS | 0% |
-| VLM scene understanding (Path A) | Hailo-10H NPU + 8GB RAM | ~1-3s latency | 0% |
-| LLM: Qwen 2.5 1.5B (offline) | Hailo-10H NPU + 8GB RAM | 20-35 tok/s | 0% |
-| LLM: Llama 3.2 1B (offline) | Hailo-10H NPU + 8GB RAM | 30-50 tok/s | 0% |
+| VLM scene understanding (Path A) | Hailo-10H NPU | ~1-3s latency | 0% |
 | VLM: Qwen2.5-VL-3B (Path B) | Pi 5 CPU | 2-5 tok/s, ~5-15s latency | ~100% of 1 core |
-| LLM: Qwen 2.5 3B (CPU fallback) | Pi 5 CPU | 2-5 tok/s | ~100% of 1 core |
-| LLM: DeepSeek V4 API (online) | Cloud (API call) | Depends on network | Minimal |
+| LLM: DeepSeek V4 Flash (online) | Cloud API | Fast (network) | 0% |
+| LLM: Ollama → NPU Proxy :8000 | Hailo-10H NPU (chat) / CPU (tools) | 20-35 tok/s (chat), slower (tools) | 0% (chat) / Moderate (tools) |
+| LLM: Ollama → CPU (fallback) | Pi 5 CPU | 2-5 tok/s | ~100% of 1 core |
 | Wake word detection | Pi 5 CPU | 3-8% CPU idle | Low |
 | STT: faster-whisper tiny | Pi 5 CPU | ~1s per utterance | Moderate |
 | STT: Vosk (offline fallback) | Pi 5 CPU | <1s per utterance | Low |
@@ -107,40 +106,34 @@ This project turns a Raspberry Pi 5 into a **voice-interactive AI assistant** wi
             │  │ STT Engine  │  │ Tool Handler │  │
             │  │ (whisper)   │  │ (servo, vis) │  │
             │  └──────┬──────┘  └──────────────┘  │
-            │         │                           │
-            │  ┌──────▼──────┐                    │
-            │  │ Piper TTS   │    GPIO Control    │
-            │  └─────────────┘  ┌──────────────┐  │
-            │                   │ RPi.GPIO     │  │
-            │                   │ / lgpio      │  │
-            │                   └──────┬───────┘  │
-            │                          │          │
-            │              ┌───────────▼────────┐ │
-            │              │ Servos | Screen    │ │
-            └──────────────┴────────────────────┘ │
-                              │                   │
-                              │ PCIe Gen 3        │
-                              ▼                   │
-                         PLANE 2: Hailo-10H NPU   │
-            ┌────────────────────────────────┐    │
-            │  Vision Pipeline              │    │
-            │  ┌────────────────────────┐   │    │
-            │  │ YOLOv8 (continuous)   │   │    │
-            │  │ → shared_buffer       │   │    │
-            │  └─────────┬─────────────┘   │    │
-            │            │                  │    │
-            │  ┌─────────▼─────────────┐   │    │
-            │  │ VLM (on-demand)       │   │    │
-            │  │ → scene descriptions  │   │    │
-            │  └─────────┬─────────────┘   │    │
-            │            │                  │    │
-            │  ┌─────────▼─────────────┐   │    │
-            │  │ LLM (Qwen 1.5B)      │   │    │
-            │  │ → offline fallback   │   │    │
-            │  └──────────────────────┘   │    │
-            │  8GB Dedicated LPDDR4X      │    │
-            └─────────────────────────────┘    │
-            ───────────────────────────────────┘
+            │         │            │               │
+            │  ┌──────▼──────┐  ┌──▼────────────┐ │
+            │  │ Piper TTS   │  │ NPU Proxy     │ │
+            │  └─────────────┘  │ :8000          │ │
+            │                   │ (chat→NPU,     │ │
+            │                   │  tools→CPU)    │ │
+            │                   └──────┬─────────┘ │
+            │                          │           │
+            │              ┌───────────▼────────┐  │
+            │              │ gpiozero + lgpio   │  │
+            │              │ Servos | Screen    │  │
+            │              └────────────────────┘  │
+            └──────────────┬───────────────────────┘
+                           │ PCIe Gen 3            
+                       PLANE 2: Hailo-10H NPU       
+            ┌────────────────────────────────┐     
+            │  Vision Pipeline              │     
+            │  ┌────────────────────────┐   │     
+            │  │ YOLOv8 (continuous)    │   │     
+            │  │ → shared_buffer        │   │     
+            │  └─────────┬──────────────┘   │     
+            │            │                  │     
+            │  ┌─────────▼──────────────┐   │     
+            │  │ VLM (on-demand)        │   │     
+            │  │ → scene descriptions   │   │     
+            │  └────────────────────────┘   │     
+            │  8GB Dedicated LPDDR4X        │     
+            └────────────────────────────────┘     
 ```
 
 ### MQTT Service Bus
@@ -181,169 +174,40 @@ This project turns a Raspberry Pi 5 into a **voice-interactive AI assistant** wi
 
 ## 4. LLM API Context & Function Calling
 
-### Setting Context via LLM API
+Both backends share the same OpenAI-compatible pattern:
 
-Both DeepSeek V4 and Qwen (via Ollama) support the same OpenAI-compatible pattern for setting system context and defining tools.
+### API Endpoints
 
-#### DeepSeek V4 API
+| Backend | Endpoint | Models |
+|---------|----------|--------|
+| DeepSeek V4 (online) | `https://api.deepseek.com/v1/chat/completions` | `deepseek-v4-flash` ($0.14/$0.28 per 1M tok) / `deepseek-v4-pro` ($1.74/$3.48) |
+| NPU Proxy (offline) | `http://localhost:8000/v1/chat/completions` (Ollama-compat) | `qwen2.5:1.5b` on Hailo-10H (chat), `qwen2.5:3b` on CPU (tools) |
 
-```
-Endpoint:  https://api.deepseek.com/v1/chat/completions
-Models:    deepseek-v4-pro (1.6T params, 49B active)
-           deepseek-v4-flash (284B params, 13B active)
-Pricing:   Flash — $0.14 input / $0.28 output per 1M tokens
-           Pro   — $1.74 input / $3.48 output per 1M tokens
-Context:   1M tokens
-Cache:     Cache hit gets 90% discount
-Tool call: Up to 128 parallel function calls, OpenAI-compatible format
-```
-
-#### Pattern for Setting Context
+### Key API Call Pattern
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(
-    api_key="sk-...",
-    base_url="https://api.deepseek.com"
-)
-
-# System message sets the assistant's behavior / context
-messages = [
-    {
-        "role": "system",
-        "content": (
-            "You are a Raspberry Pi 5 AI assistant connected to a camera, "
-            "2 servo motors, and a display. You can detect objects in real time, "
-            "analyze scenes via vision-language model, move servos, and write to GPIO pins. "
-            "Use the provided tools when the user asks about visual input or physical actions. "
-            "When no internet is available, you fall back to a local Qwen model."
-        )
-    },
-    {
-        "role": "user",
-        "content": "Is there a person in the frame?"
-    }
-]
-
-# Tools array defines what the LLM can invoke
-tools = [...]  # See Tool Definitions section
+client = OpenAI(api_key=api_key, base_url=base_url)
 
 response = client.chat.completions.create(
     model="deepseek-v4-flash",
-    messages=messages,
-    tools=tools,
+    messages=[  # system + user + assistant + tool
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": user_text},
+    ],
+    tools=tool_definitions,  # 5 tools: visual_detect, vlm_query, servo_write, gpio_write, screen_display
     tool_choice="auto",
 )
 ```
 
-#### Qwen via Ollama (Local Fallback)
+### Tool Loop Flow
 
-```python
-import ollama
-
-response = ollama.chat(
-    model="qwen2.5:1.5b",
-    messages=[{"role": "system", "content": "..."}, {"role": "user", "content": "..."}],
-    tools=tools,        # Same tool definitions as DeepSeek
-    tool_choice="auto",
-)
+```
+LLM returns tool_calls → dispatches to handler → MQTT to target service → result → LLM call #2 → loop until text
 ```
 
-The `router.py` in the LLM Orchestrator auto-detects internet connectivity and switches between DeepSeek and Qwen.
-
-### Tool Definitions (Shared Across Both LLMs)
-
-```python
-tools = [
-    {
-        "name": "visual_detect",
-        "description": "Get current object detections from the camera in real time",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "classes": {
-                    "type": "array", "items": {"type": "string"},
-                    "description": "Optional filter: only return these object classes"
-                },
-                "min_confidence": {
-                    "type": "number",
-                    "description": "Minimum confidence (0.0-1.0), defaults to 0.5"
-                }
-            }
-        }
-    },
-    {
-        "name": "vlm_query",
-        "description": "Ask a question about the current camera view (scene understanding)",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "prompt": {
-                    "type": "string",
-                    "description": "Question about the scene, e.g. 'What color is the car?' or 'How many people are there?'"
-                }
-            },
-            "required": ["prompt"]
-        }
-    },
-    {
-        "name": "servo_write",
-        "description": "Set a servo motor to a specific angle (0-180 degrees)",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "servo": {
-                    "type": "integer", "enum": [1, 2],
-                    "description": "Servo number: 1 or 2"
-                },
-                "angle": {
-                    "type": "integer", "minimum": 0, "maximum": 180,
-                    "description": "Target angle in degrees"
-                }
-            },
-            "required": ["servo", "angle"]
-        }
-    },
-    {
-        "name": "gpio_write",
-        "description": "Set a GPIO pin HIGH (true) or LOW (false)",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "pin": {
-                    "type": "integer",
-                    "description": "BCM GPIO pin number"
-                },
-                "value": {
-                    "type": "boolean",
-                    "description": "true = HIGH (3.3V), false = LOW (0V)"
-                }
-            },
-            "required": ["pin", "value"]
-        }
-    },
-    {
-        "name": "screen_display",
-        "description": "Display text content on the connected screen",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "Text content to display"
-                },
-                "clear": {
-                    "type": "boolean",
-                    "description": "Whether to clear the screen first",
-                    "default": True
-                }
-            },
-            "required": ["content"]
-        }
-    }
-]
-```
+The `tool_definitions.py` file shared across both backends defines 5 tools using OpenAI JSON Schema format. See `router.py` (§5.3) for auto-detection logic.
 
 ---
 
@@ -400,57 +264,75 @@ vision_service/
 **config.yaml:**
 ```yaml
 camera:
-  sensor: "imx708"                 # Camera Module 3 sensor
-  base_resolution: [640, 640]      # YOLO input size (always this for inference)
+  sensor: "imx708"
+  base_resolution: [640, 640]
   base_framerate: 30
   dynamic_adjust:
     enabled: true
-    check_interval: 0.5            # seconds between motion checks
-    motion_threshold: 30           # mean pixel diff to trigger "high motion"
-    motion_window: 5               # frames to average for smoothing
+    check_interval: 0.5
+    motion_threshold: 30
+    motion_window: 5
     profiles:
       low_motion:
         resolution: [640, 640]
         framerate: 30
-        label: "full quality"
       high_motion:
         resolution: [640, 320]
         framerate: 60
-        label: "fast capture"
+
 detection:
-  model: "yolov8n"           # yolov8n / yolov8s
+  backend: "hailo"
+  model: "yolov8n"
   confidence: 0.5
   iou_threshold: 0.45
-  backend: "hailo"           # Runs on Hailo-10H NPU
+
 vlm:
-  mode: "hailo"              # "hailo" (Path A) or "qwen-cpu" (Path B)
+  mode: "hailo"               # "hailo" (Path A) or "qwen-cpu" (Path B)
+  hailo_app: "hailo_apps.python.gen_ai_apps.vlm_chat.vlm_chat"
+  hailo_input: "rpi"
+  qwen_model: "qwen2.5vl:3b"
+  qwen_timeout: 30
+
+shared_buffer:
+  max_age_ms: 1000
+
+mqtt:
+  broker: "localhost"
+  port: 1883
+  topic_query: "vision/query"
+  topic_result: "vision/result"
 ```
 
 **`shared_buffer.py` details:**
 ```python
-import threading
-import time
-
 class SharedDetectionBuffer:
-    def __init__(self):
+    def __init__(self, max_age_ms=1000):
         self._lock = threading.Lock()
         self._detections = []
         self._timestamp = 0
         self._latest_frame = None
+        self._max_age_ms = max_age_ms
 
-    def update(self, detections, frame):
+    def update(self, detections, frame=None):
         with self._lock:
             self._detections = detections
             self._timestamp = time.time()
-            self._latest_frame = frame
+            if frame is not None:
+                self._latest_frame = frame
 
     def get(self):
         with self._lock:
+            age_ms = (time.time() - self._timestamp) * 1000
             return {
                 "detections": self._detections.copy(),
                 "timestamp": self._timestamp,
-                "age_ms": (time.time() - self._timestamp) * 1000
+                "age_ms": round(age_ms, 1),
+                "stale": age_ms > self._max_age_ms,
             }
+
+    def get_frame(self):
+        with self._lock:
+            return self._latest_frame.copy() if self._latest_frame is not None else None
 ```
 
 **Flow:**
@@ -466,58 +348,72 @@ class SharedDetectionBuffer:
 
 ### 5.3 LLM Orchestrator
 
-**Purpose:** Central AI reasoning — routes between DeepSeek (online) and Qwen (offline), manages tool calls.
+**Purpose:** Central AI reasoning — routes between DeepSeek (online) and Ollama via NPU proxy (offline, NPU for chat, CPU for tools).
 
 ```
 llm_orchestrator/
-├── main.py              # MQTT loop: subscribes command/in, publishes response/out
-├── deepseek_client.py   # OpenAI-compatible client for DeepSeek V4 API
-├── ollama_client.py     # Client for local Qwen on Hailo-10H (via Ollama)
-├── tool_definitions.py  # All tool schemas (shared with both clients)
+├── main.py                 # MQTT loop: subscribes command/in, publishes response/out
+├── deepseek_client.py      # OpenAI-compatible client for DeepSeek V4 API
+├── ollama_client.py        # Client for local Qwen via NPU proxy (CPU fallback)
+├── hailo_ollama_proxy.py   # HTTP proxy :8000 — NPU for chat, CPU Ollama for tools
+├── tool_definitions.py     # 5 tool schemas (OpenAI-compatible)
 ├── tool_handlers/
-│   ├── visual_detect.py # Reads shared_buffer from Vision Service
-│   ├── vlm_query.py     # Publishes vision/query, awaits vision/result
-│   ├── servo_write.py   # Publishes to gpio/command
-│   ├── gpio_write.py    # Publishes to gpio/command
-│   └── screen_display.py # Publishes to gpio/command
-├── router.py            # Auto-detect: online → DeepSeek, offline → Qwen
-└── config.yaml          # API keys, model IDs, timeout settings
+│   ├── visual_detect.py    # Reads shared_buffer from Vision Service
+│   ├── vlm_query.py        # Publishes vision/query, awaits vision/result
+│   ├── servo_write.py      # Publishes to gpio/command
+│   ├── gpio_write.py       # Publishes to gpio/command
+│   └── screen_display.py   # Publishes to gpio/command
+├── router.py               # Auto-detect: online → DeepSeek, offline → NPU proxy
+└── config.yaml             # API key env, model names, MQTT topics
 ```
 
 **config.yaml:**
 ```yaml
 deepseek:
-  api_key: "${DEEPSEEK_API_KEY}"  # Load from env variable
-  model: "deepseek-v4-flash"       # or deepseek-v4-pro
+  api_key_env: "DEEPSEEK_API_KEY"  # Load from env
+  model: "deepseek-v4-flash"
   base_url: "https://api.deepseek.com"
-  timeout: 30  # seconds
+  timeout: 30
 
 ollama:
-  model: "qwen2.5:1.5b"           # Runs on Hailo-10H NPU
-  base_url: "http://localhost:11434"
-  fallback_model: "qwen2.5:3b"    # CPU fallback if Hailo not available
+  model: "qwen2.5:1.5b"           # NPU proxy (port 8000)
+  base_url: "http://localhost:8000"
+  fallback_model: "qwen2.5:3b"    # CPU fallback (port 11434)
+  fallback_url: "http://localhost:11434"
 
 router:
-  connectivity_check_interval: 30  # seconds between online checks
-  prefer_online: true               # Use DeepSeek when internet available
+  connectivity_check_interval: 30
+  prefer_online: true
 ```
 
 **`router.py` logic:**
 
 ```python
-def is_online():
-    try:
-        import socket
-        socket.create_connection(("api.deepseek.com", 443), timeout=3)
-        return True
-    except OSError:
-        return False
+class Router:
+    def __init__(self, config):
+        self._check_interval = config["router"]["connectivity_check_interval"]
+        self._cached_online = None
+        self._last_check = 0
 
-def get_llm_client():
-    if is_online():
-        return DeepSeekClient(model=config.deepseek.model)
-    else:
-        return OllamaClient(model=config.ollama.model)
+    def should_use_online(self):
+        if not self.config["router"]["prefer_online"]:
+            return False
+        return self.get_online_status()
+
+    def get_online_status(self):
+        now = time.time()
+        if self._cached_online is None or (now - self._last_check) > self._check_interval:
+            self._cached_online = self._ping()
+            self._last_check = now
+        return self._cached_online
+
+    @staticmethod
+    def _ping():
+        try:
+            socket.create_connection(("api.deepseek.com", 443), timeout=3)
+            return True
+        except OSError:
+            return False
 ```
 
 **Flow:**
@@ -926,18 +822,26 @@ rpicam-hello -t 0 --post-process-file \
   /usr/share/rpi-camera-assets/hailo_yolov8_inference.json
 ```
 
-### Step 6: Install Ollama (for local LLM on Hailo)
+### Step 6: Install Ollama & Setup NPU Proxy
 
 ```bash
-# The hailo-apps includes hailo-ollama integration
-# Or install Ollama separately:
+# Install Ollama (CPU fallback):
 curl -fsSL https://ollama.com/install.sh | sh
+ollama pull qwen2.5:3b
 
-# Pull Qwen for Hailo-10H:
-ollama pull qwen2.5:1.5b
+# Start Ollama on port 11434:
+ollama serve &
 
-# Test:
-ollama run qwen2.5:1.5b "Hello, what can you see?"
+# Setup Hailo NPU Ollama Proxy (port 8000):
+sudo cp pi5_assistant/llm_orchestrator/hailo-ollama-proxy.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable hailo-ollama-proxy
+sudo systemctl start hailo-ollama-proxy
+
+# Verify proxy:
+curl -X POST http://localhost:8000/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen2.5:1.5b","messages":[{"role":"user","content":"Hi"}],"stream":false}'
 ```
 
 ### Step 7: Run VLM Chat Demo
@@ -1016,7 +920,7 @@ python -m hailo_apps.python.gen_ai_apps.vlm_chat.vlm_chat --input usb
 | Task | Details | Owner |
 |------|---------|-------|
 | `pin_config.py` | Logical → physical pin mapping | TBD |
-| `servo_controller.py` | Hardware PWM via pigpio | TBD |
+| `servo_controller.py` | Kernel PWM via `/sys/class/pwm/pwmchip0` | TBD |
 | `screen_driver.py` | Abstract interface + one implementation | TBD |
 | `servo_write` handler | MQTT → PWM → servo movement | TBD |
 | `gpio_write` handler | MQTT → GPIO pin toggle | TBD |

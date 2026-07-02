@@ -14,7 +14,7 @@ Features real-time object detection, local/cloud LLM reasoning, voice interrupt,
 │  │          │  │          │  │              │  │          │  │    │ │
 │  │ Wake Word│  │ YOLOv8n  │  │ DeepSeek V4  │  │ Servo 1/2│  │Conv│ │
 │  │ STT (Whis│  │ VLM (Hail│  │ ├─ online    │  │ Screen   │  │Intr│ │
-│  │ TTS (Eli│  │ SharedBuf│  │ └─ Qwen local │  │ GPIO pins│  │    │ │
+│  │ TTS (Pipe│  │ SharedBuf│  │ └─ NPU proxy  │  │ GPIO pins│  │    │ │
 │  └────┬─────┘  └────┬─────┘  └──────┬───────┘  └────┬─────┘  └─┬──┘ │
 │       │             │               │               │          │     │
 │       └─────┬───────┴───────┬───────┴───────┬───────┴──────────┘     │
@@ -36,9 +36,9 @@ pi5_assistant/
 │
 ├── voice_service/            # Voice I/O
 │   ├── main.py               # Entry point, MQTT loop
-│   ├── wake_detector.py      # Porcupine/private wake word engine
-│   ├── stt_engine.py         # Whisper.cpp speech-to-text
-│   ├── tts_engine.py         # Piper TTS / ElevenLabs
+│   ├── wake_detector.py      # OpenWakeWord — always-on, 3-8% CPU idle
+│   ├── stt_engine.py         # faster-whisper (default) / Vosk (fallback)
+│   ├── tts_engine.py         # Piper TTS (local, ~200ms per response)
 │   └── config.yaml
 │
 ├── vision_service/           # Camera & vision pipeline
@@ -50,8 +50,9 @@ pi5_assistant/
 │
 ├── llm_orchestrator/         # AI reasoning
 │   ├── main.py               # Entry point, tool loop
-│   ├── deepseek_client.py    # DeepSeek V4 Flash/Pro API (online)
-│   ├── ollama_client.py      # Qwen 2.5 via Ollama on Hailo (offline)
+│   ├── deepseek_client.py    # DeepSeek V4 Flash API (online)
+│   ├── ollama_client.py      # Qwen 2.5 via NPU proxy / CPU Ollama
+│   ├── hailo_ollama_proxy.py # HTTP proxy :8000 — NPU for chat, CPU for tools
 │   ├── router.py             # Connectivity detection, auto-switch
 │   ├── tool_definitions.py   # 5 tool schemas (OpenAI-compatible)
 │   ├── tool_handlers/        # One file per tool
@@ -90,11 +91,11 @@ pi5_assistant/
 | **VLM (Path A)** | Hailo VLM on NPU (fast, zero-CPU load) |
 | **VLM (Path B)** | Qwen2.5-VL-3B on CPU via Ollama (fallback) |
 | **LLM (Online)** | DeepSeek V4 Flash API ($0.14/M tokens) |
-| **LLM (Offline)** | Qwen 2.5 1.5B on Hailo-10H via Ollama (20-35 tok/s) |
+| **LLM (Offline)** | Qwen 2.5 1.5B on Hailo-10H via NPU proxy:8000 (chat) / CPU Ollama:11434 (tools) |
 | **Inter-service** | MQTT via Mosquitto |
-| **Wake Word** | Porcupine / custom |
-| **STT** | Whisper.cpp |
-| **TTS** | Piper TTS / ElevenLabs API |
+| **Wake Word** | OpenWakeWord |
+| **STT** | faster-whisper / Vosk |
+| **TTS** | Piper TTS |
 | **Servo PWM** | Kernel PWM via `/sys/class/pwm/pwmchip0` (GPIO18/GPIO12) |
 | **Screen** | SSD1306 OLED (I2C) / TFT / HDMI (TBD) |
 
@@ -114,15 +115,18 @@ source .venv/bin/activate
 # 3. Install Python dependencies
 pip install -r requirements.txt
 
-# 4. Set environment variables
+# 4. Export environment
 export DEEPSEEK_API_KEY="your_key_here"   # Required for online LLM
 
-# 5. Run a single service (each in its own terminal)
-python -m voice_service.main              # Voice I/O
-python -m vision_service.main             # Camera + YOLO + VLM
-python -m llm_orchestrator.main           # AI reasoning
-python -m gpio_service.main               # Servos + screen
-python -m session_manager.main            # Session lifecycle
+# 5. Start required services (each in its own terminal)
+sudo systemctl start mosquitto           # MQTT broker
+sudo systemctl start hailo-ollama-proxy  # NPU proxy on :8000
+
+python -m voice_service.main             # Voice I/O
+python -m vision_service.main            # Camera + YOLO + VLM
+python -m llm_orchestrator.main          # AI reasoning
+python -m gpio_service.main              # Servos + screen
+python -m session_manager.main           # Session lifecycle
 ```
 
 ## Developing & Extending
