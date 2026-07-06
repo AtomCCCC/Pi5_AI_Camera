@@ -11,6 +11,7 @@ import yaml
 import threading
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
 from pi5_assistant.mqtt_client import MQTTClient
 from vision_service.shared_buffer import SharedDetectionBuffer
 from vision_service.detection_pipeline import DetectionPipeline
@@ -18,10 +19,10 @@ from vision_service.vlm_engine import VLMEngine
 
 
 class VisionService:
-    """Orchestrates continuous detection + on-demand VLM."""
-
     def __init__(self, config_path: str = "config.yaml"):
-        with open(config_path) as f:
+        config_dir = os.path.dirname(os.path.abspath(__file__))
+        full_config_path = os.path.join(config_dir, config_path)
+        with open(full_config_path) as f:
             self.cfg = yaml.safe_load(f)
 
         self.mqtt = MQTTClient("vision", self.cfg["mqtt"]["broker"],
@@ -29,11 +30,12 @@ class VisionService:
         self.buffer = SharedDetectionBuffer(
             max_age_ms=self.cfg["shared_buffer"]["max_age_ms"]
         )
-        self.pipeline = DetectionPipeline(self.buffer, self.cfg)
+        self.pipeline = DetectionPipeline(self.cfg, self.buffer, self.mqtt)
         self.vlm = VLMEngine(self.cfg["vlm"]["mode"], self.cfg)
 
     def run(self):
         self.mqtt.subscribe(self.cfg["mqtt"]["topic_query"], self._on_query)
+
         self.pipeline.start()
 
         print("[Vision] Service started. Detection pipeline running.")
@@ -43,7 +45,6 @@ class VisionService:
             self.stop()
 
     def _on_query(self, payload):
-        """Handle a VLM query request."""
         prompt = payload.get("prompt", "Describe what you see in this image.")
         session_id = payload.get("session_id", "unknown")
 
