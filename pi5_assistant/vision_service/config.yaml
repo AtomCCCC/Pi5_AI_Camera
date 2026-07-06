@@ -53,3 +53,6 @@ mqtt:
   port: 1883
   topic_query: "vision/query"
   topic_result: "vision/result"
+  topic_fps_status:"vision/fps/status"
+  
+
