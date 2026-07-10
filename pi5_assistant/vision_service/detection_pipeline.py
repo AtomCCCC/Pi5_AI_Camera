@@ -1,16 +1,40 @@
 """Continuous real-time object detection on Hailo-10H.
 
-Camera Module 3 → Hailo-10H YOLO pipeline → shared_buffer.
+Camera Module 3 -> Hailo-10H YOLO pipeline -> shared_buffer.
 
-Camera capture uses rpicam-jpeg (subprocess) since OpenCV cv2.VideoCapture
-does not work with Pi Camera Module 3's libcamera backend.
+YOLOv8m (COCO 80 classes) with NMS on-device.
+Bounding boxes are normalized 0-1 fractions of the model input (640x640).
+
+HAILO_NMS_BY_CLASS output format (per class):
+  [count(float32), detection1, detection2, ...]
+  each detection = [ymin, xmin, ymax, xmax, score]  (float32, 0-1 normalized)
 """
 
-import time
-import cv2
 import json
 import subprocess as sp
+import threading
+import time
+
+import cv2
 import numpy as np
+
+COCO_CLASSES = [
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
+    "truck", "boat", "traffic light", "fire hydrant", "stop sign",
+    "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep",
+    "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
+    "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard",
+    "sports ball", "kite", "baseball bat", "baseball glove", "skateboard",
+    "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork",
+    "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+    "couch", "potted plant", "bed", "dining table", "toilet", "tv",
+    "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave",
+    "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase",
+    "scissors", "teddy bear", "hair drier", "toothbrush",
+]
+
+HEF_PATH = "/usr/local/hailo/resources/models/hailo10h/yolov8m.hef"
 
 
 class DetectionPipeline:
@@ -37,25 +61,73 @@ class DetectionPipeline:
         self.previous_gray = None
 
         self.topic_fps_status = config["mqtt"].get(
-            "topic_fps_status",
-            "vision/fps/status"
+            "topic_fps_status", "vision/fps/status"
         )
 
+        self._thread = None
+        self._stop_event = threading.Event()
+
+    def start(self):
+        if self._thread is not None:
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run_loop, name="detection-pipeline", daemon=True
+        )
+        self._thread.start()
+        print("[Vision] Detection pipeline started (continuous thread).")
+
+    def stop(self):
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+        if self._vdevice is not None:
+            self._vdevice.release()
+            self._vdevice = None
+        print("[Vision] Detection pipeline stopped.")
+
+    def _run_loop(self):
+        base_res = self.config["camera"]["base_resolution"]
+        w, h = base_res
+
+        while not self._stop_event.is_set():
+            frame = self._capture_frame(w, h)
+            if frame is None:
+                time.sleep(0.01)
+                continue
+
+            motion_score = self.estimate_motion(frame)
+
+            now = time.time()
+            if self.enabled and now - self.last_check_time >= self.check_interval:
+                self.current_profile = self.select_profile(motion_score)
+                self.publish_fps_status(motion_score)
+                self.last_check_time = now
+
+            detections = self._infer(frame)
+
+            self.shared_buffer.update(
+                {
+                    "detections": detections,
+                    "motion_profile": self.current_profile,
+                    "motion_score": round(motion_score, 2),
+                },
+                frame=frame,
+            )
+
     def _init_hailo(self):
-        """Lazy-init Hailo-10H infer model (called once on first process_frame)."""
         if self._configured_model is not None:
             return
 
-        from hailo_platform import VDevice, HailoSchedulingAlgorithm
-
-        hef_path = "/usr/local/hailo/resources/models/hailo10h/hailo_yolov8n_4_classes_vga.hef"
+        from hailo_platform import HailoSchedulingAlgorithm, VDevice
 
         params = VDevice.create_params()
         params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
         params.group_id = "SHARED"
         self._vdevice = VDevice(params)
 
-        infer_model = self._vdevice.create_infer_model(hef_path)
+        infer_model = self._vdevice.create_infer_model(HEF_PATH)
         infer_model.set_batch_size(1)
 
         input_stream = infer_model.inputs[0]
@@ -65,6 +137,7 @@ class DetectionPipeline:
             self._output_buffers[s.name] = np.empty(s.shape, dtype=np.float32)
 
         self._configured_model = infer_model.configure()
+        print(f"[Vision] Hailo-10H YOLOv8m ({len(COCO_CLASSES)} classes) initialized.")
 
     def estimate_motion(self, frame):
         small = cv2.resize(frame, (160, 120))
@@ -86,24 +159,29 @@ class DetectionPipeline:
         return "low_motion"
 
     def _capture_frame(self, w, h):
-        """Capture a single frame via rpicam-jpeg."""
         result = sp.run(
-            ["rpicam-jpeg", "--output", "-", "--width", str(w), "--height", str(h),
-             "--nopreview", "--timeout", "100"],
-            capture_output=True, timeout=5
+            [
+                "rpicam-jpeg", "--output", "-",
+                "--width", str(w), "--height", str(h),
+                "--nopreview", "--timeout", "100",
+            ],
+            capture_output=True,
+            timeout=5,
         )
         if len(result.stdout) < 100:
             return None
         return cv2.imdecode(np.frombuffer(result.stdout, np.uint8), cv2.IMREAD_COLOR)
 
     def _infer(self, frame):
-        """Run Hailo YOLO inference on a frame. Returns list of detections."""
         self._init_hailo()
 
         resized = cv2.resize(frame, (self._model_w, self._model_h))
         input_batch = np.expand_dims(resized.astype(np.uint8), 0)
 
-        out = {name: np.empty(buf.shape, dtype=buf.dtype) for name, buf in self._output_buffers.items()}
+        out = {
+            name: np.empty(buf.shape, dtype=buf.dtype)
+            for name, buf in self._output_buffers.items()
+        }
         b = self._configured_model.create_bindings(output_buffers=out)
         b.input().set_buffer(np.array(input_batch))
         self._configured_model.run([b], timeout=10000)
@@ -112,28 +190,47 @@ class DetectionPipeline:
         return self._postprocess(raw)
 
     def _postprocess(self, raw: np.ndarray) -> list[dict]:
-        """Parse HAILO_NMS_BY_CLASS output from hailo_yolov8n_4_classes_vga."""
-        conf_threshold = self.config["detection"]["confidence"]
-        class_names = ["person", "car", "bicycle", "motorcycle"]
+        """Parse HAILO_NMS_BY_CLASS output.
 
+        Format per class: count(float32) + N * [ymin, xmin, ymax, xmax, score]
+        All values are normalized 0-1 (fractions of model input).
+
+        Returns detections as [{label, confidence, bbox: [x, y, w, h]}]
+        where bbox values are also normalized 0-1.
+        """
+        conf_threshold = self.config["detection"]["confidence"]
         data = raw.ravel()
         idx = 0
         detections = []
-        for class_id in range(4):
+
+        n_classes = len(COCO_CLASSES)
+        for class_id in range(n_classes):
             count = int(data[idx])
             idx += 1
             if count <= 0:
                 continue
+
             bboxes = data[idx:idx + count * 5].reshape(-1, 5)
             idx += count * 5
-            for x1, y1, x2, y2, conf in bboxes:
-                if conf >= conf_threshold:
-                    detections.append({
-                        "class": class_id,
-                        "name": class_names[class_id],
-                        "confidence": round(float(conf), 3),
-                        "bbox": [int(x1), int(y1), int(x2 - x1), int(y2 - y1)],
-                    })
+
+            for detection in bboxes:
+                ymin, xmin, ymax, xmax, score = detection
+                if score >= conf_threshold:
+                    w = xmax - xmin
+                    h = ymax - ymin
+                    detections.append(
+                        {
+                            "label": COCO_CLASSES[class_id],
+                            "confidence": round(float(score), 3),
+                            "bbox": [
+                                round(float(xmin), 4),
+                                round(float(ymin), 4),
+                                round(float(w), 4),
+                                round(float(h), 4),
+                            ],
+                        }
+                    )
+
         return detections
 
     def publish_fps_status(self, motion_score):
@@ -141,20 +238,17 @@ class DetectionPipeline:
             return
 
         profile_cfg = self.profiles[self.current_profile]
-
         payload = {
             "service": "vision_service",
             "profile": self.current_profile,
             "motion_score": round(motion_score, 2),
             "resolution": profile_cfg["resolution"],
             "framerate": profile_cfg["framerate"],
-            "timestamp": time.time()
+            "timestamp": time.time(),
         }
-
         self.mqtt_client.publish(self.topic_fps_status, json.dumps(payload))
 
     def process_frame(self, frame=None):
-        """Main entry point: capture frame, run Hailo inference, update buffer."""
         base_res = self.config["camera"]["base_resolution"]
         w, h = base_res
 
@@ -177,9 +271,9 @@ class DetectionPipeline:
             {
                 "detections": detections,
                 "motion_profile": self.current_profile,
-                "motion_score": round(motion_score, 2)
+                "motion_score": round(motion_score, 2),
             },
-            frame=frame
+            frame=frame,
         )
 
         return detections

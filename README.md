@@ -1,9 +1,16 @@
 # Pi5 AI Camera — Complete Architecture Document
 
 > **Author:** AI-assisted design  
-> **Date:** 2026-07-01  
-> **Status:** Development — LLM backends (DeepSeek + NPU proxy) + GPIO (kernel PWM) tested on hardware  
+> **Date:** 2026-07-10  
+> **Status:** Development — merged vision branch updates (continuous detection thread + YOLOv8m COCO parsing) with LLM backends and GPIO pipeline validated on hardware  
 > **Hardware:** Pi 5 (8GB) + AI HAT+ 2 (Hailo-10H, 40 TOPS) + Camera Module 3
+
+### Latest Progress (2026-07-10)
+
+- Merged branch `Vison_LLM_Destect` into `main`.
+- Vision service now uses the threaded detection pipeline (`start()` / `stop()`) in `vision_service/main.py`.
+- Detection pipeline switched to YOLOv8m HEF with COCO-class parsing and normalized bbox output.
+- Vision config cleaned up and fixed `topic_fps_status` YAML formatting.
 
 ---
 
