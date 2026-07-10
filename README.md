@@ -11,6 +11,7 @@
 - Vision service now uses the threaded detection pipeline (`start()` / `stop()`) in `vision_service/main.py`.
 - Detection pipeline switched to YOLOv8m HEF with COCO-class parsing and normalized bbox output.
 - Vision config cleaned up and fixed `topic_fps_status` YAML formatting.
+- Re-verified `llm_orchestrator/` and shared MQTT client package; aligned this README with current topic routing and backend API shapes.
 
 ---
 
@@ -181,16 +182,16 @@ This project turns a Raspberry Pi 5 into a **voice-interactive AI assistant** wi
 
 ## 4. LLM API Context & Function Calling
 
-Both backends share the same OpenAI-compatible pattern:
+The orchestrator supports two backend API shapes:
 
 ### API Endpoints
 
-| Backend | Endpoint | Models |
-|---------|----------|--------|
-| DeepSeek V4 (online) | `https://api.deepseek.com/v1/chat/completions` | `deepseek-v4-flash` ($0.14/$0.28 per 1M tok) / `deepseek-v4-pro` ($1.74/$3.48) |
-| NPU Proxy (offline) | `http://localhost:8000/v1/chat/completions` (Ollama-compat) | `qwen2.5:1.5b` on Hailo-10H (chat), `qwen2.5:3b` on CPU (tools) |
+| Backend | Endpoint | Models | Client |
+|---------|----------|--------|--------|
+| DeepSeek V4 (online) | `https://api.deepseek.com` (OpenAI chat completions) | `deepseek-v4-flash` / `deepseek-v4-pro` | `deepseek_client.py` (`openai` SDK) |
+| Ollama via NPU Proxy (offline) | `http://localhost:8000/api/chat` (Ollama API) | `qwen2.5:1.5b` on Hailo-10H (chat), `qwen2.5:3b` on CPU fallback (tools / proxy-down fallback) | `ollama_client.py` (`requests`) |
 
-### Key API Call Pattern
+### Key API Call Pattern (DeepSeek)
 
 ```python
 from openai import OpenAI
@@ -208,13 +209,26 @@ response = client.chat.completions.create(
 )
 ```
 
+### Key API Call Pattern (Ollama / NPU Proxy)
+
+```python
+payload = {
+    "model": "qwen2.5:1.5b",
+    "messages": messages,
+    "tools": tool_definitions,
+    "stream": False,
+}
+
+response = requests.post("http://localhost:8000/api/chat", json=payload, timeout=60).json()
+```
+
 ### Tool Loop Flow
 
 ```
 LLM returns tool_calls → dispatches to handler → MQTT to target service → result → LLM call #2 → loop until text
 ```
 
-The `tool_definitions.py` file shared across both backends defines 5 tools using OpenAI JSON Schema format. See `router.py` (§5.3) for auto-detection logic.
+The `tool_definitions.py` file shared across both backends defines 5 tools using OpenAI-style schema wrappers. `main.py` handles both response formats (OpenAI object vs Ollama JSON dict) in one tool loop.
 
 ---
 
@@ -365,7 +379,7 @@ llm_orchestrator/
 ├── hailo_ollama_proxy.py   # HTTP proxy :8000 — NPU for chat, CPU Ollama for tools
 ├── tool_definitions.py     # 5 tool schemas (OpenAI-compatible)
 ├── tool_handlers/
-│   ├── visual_detect.py    # Reads shared_buffer from Vision Service
+│   ├── visual_detect.py    # Publishes vision/detect, waits vision/detect_result
 │   ├── vlm_query.py        # Publishes vision/query, awaits vision/result
 │   ├── servo_write.py      # Publishes to gpio/command
 │   ├── gpio_write.py       # Publishes to gpio/command
@@ -429,6 +443,34 @@ class Router:
 3. If LLM returns text → publishes `response/out`
 4. If LLM returns tool_calls → dispatches to appropriate `tool_handler/`
 5. Collects results → sends back to LLM for final text response → publishes `response/out`
+
+**MQTT topic bindings (current code):**
+
+| Direction | Topic | Used by |
+|-----------|-------|---------|
+| Inbound | `command/in` | LLM Orchestrator subscriber (`config.yaml`) |
+| Outbound | `response/out` | LLM Orchestrator publisher (`config.yaml`) |
+| Outbound | `vision/detect` | `tool_handlers/visual_detect.py` |
+| Inbound (tool wait) | `vision/detect_result` | `tool_handlers/visual_detect.py` |
+| Outbound | `vision/query` | `tool_handlers/vlm_query.py` |
+| Inbound (tool wait) | `vision/result` | `tool_handlers/vlm_query.py` |
+| Outbound | `gpio/command` | `servo_write.py`, `gpio_write.py`, `screen_display.py` |
+
+#### Shared MQTT Package (`pi5_assistant/`)
+
+The shared package currently provides `mqtt_client.py`, a thin JSON wrapper around `paho-mqtt` used by all services.
+
+```python
+mqtt = MQTTClient("service_name", "localhost", 1883)
+mqtt.subscribe("topic/in", callback)   # callback receives parsed dict
+mqtt.publish("topic/out", {"k": "v"})
+mqtt.stop()
+```
+
+Current behavior in code:
+- Publishes with `json.dumps(payload)`.
+- Subscribes per-topic via `message_callback_add` and `json.loads(...)` before callback.
+- Starts background loop via `loop_start()` in constructor.
 
 ---
 
