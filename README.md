@@ -13,6 +13,52 @@
 - Vision config cleaned up and fixed `topic_fps_status` YAML formatting.
 - Re-verified `llm_orchestrator/` and shared MQTT client package; aligned this README with current topic routing and backend API shapes.
 
+### Pi5_AI_Camera — LLM / VLM Deployment Architecture Summary
+
+#### LLM backends (text inference)
+
+| Backend | Model | Runtime | Port/Endpoint | Role |
+|---------|-------|---------|---------------|------|
+| DeepSeek V4 (online) | `deepseek-v4-flash` | Cloud API | `api.deepseek.com` | Fastest online dialogue + tool-calling |
+| NPU Proxy (offline) | `Qwen2.5-1.5B-Instruct.hef` | Hailo-10H NPU (0% CPU) | `:8000` | Offline plain chat (Ollama-compatible API) |
+| CPU Ollama fallback | `qwen2.5:3b` (`Q4_K_M`, ~1.9GB) | Pi 5 CPU | `:11434` | Tool-calling and complex reasoning fallback |
+
+Routing logic (`router.py`):
+
+```text
+online network -> DeepSeek V4 (cloud)
+offline        -> NPU proxy :8000
+                  |- plain chat   -> Hailo-10H NPU (20-35 tok/s)
+                  `- tool calling -> CPU Ollama :11434
+npu unavailable -> CPU Ollama :11434 (direct)
+```
+
+#### VLM backends (vision understanding)
+
+| Path | Model | Runtime | Latency |
+|------|-------|---------|---------|
+| Path A | Hailo VLM (CLIP ViT-B-32 encoder + Qwen decoder) | Hailo-10H NPU (0% CPU) | ~1-3s |
+| Path B | `qwen2.5vl:3b` (not deployed) | Pi 5 CPU | ~5-15s (theoretical) |
+
+Current note: `qwen2.5vl:3b` is not downloaded in Ollama yet. Available local models are `qwen2.5:3b` and `qwen2.5:1.5b` (text-only).
+
+#### Detection backend
+
+| Model | Runtime | Classes | FPS |
+|-------|---------|---------|-----|
+| `yolov8m.hef` | Hailo-10H NPU | COCO 80 | 430+ |
+
+```text
+                       |- DeepSeek V4 Flash ----- Cloud API (online)
+LLM (text) ------------|- Qwen2.5-1.5B ---------- Hailo-10H NPU (offline chat)
+                       `- Qwen2.5-3B ------------ Pi 5 CPU (offline tools)
+
+VLM (vision) ----------|- Hailo CLIP+Qwen ------- Hailo-10H NPU (Path A)
+                       `- Qwen2.5-VL-3B --------- Pi 5 CPU (Path B, not deployed)
+
+Detection ------------- `yolov8m` --------------- Hailo-10H NPU (COCO 80)
+```
+
 ---
 
 ## Table of Contents
