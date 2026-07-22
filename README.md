@@ -1,4 +1,4 @@
-# Pi5 AI Camera — Complete Architecture Document
+# Pi5 AI Camera — Complete Architecture Document 1.00
 
 > **Author:** AI-assisted design  
 > **Date:** 2026-07-10  
