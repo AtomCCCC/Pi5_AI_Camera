@@ -11,6 +11,7 @@ import os
 import yaml
 import json
 import logging
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from pi5_assistant.mqtt_client import MQTTClient
@@ -30,7 +31,8 @@ logger = logging.getLogger(__name__)
 class LLMOrchestrator:
     """Central AI reasoning — routes, calls, dispatches tools."""
 
-    def __init__(self, config_path: str = "config.yaml"):
+    def __init__(self, config_path: str | None = None):
+        config_path = config_path or Path(__file__).with_name("config.yaml")
         with open(config_path) as f:
             self.cfg = yaml.safe_load(f)
 

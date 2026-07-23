@@ -129,6 +129,24 @@ python -m gpio_service.main              # Servos + screen
 python -m session_manager.main           # Session lifecycle
 ```
 
+## One-command startup and live dashboard
+
+On the Pi, install the project dependencies once, make sure Mosquitto is
+running, then start every service plus the dashboard with one command:
+
+```bash
+cd Pi5_AI_Camera
+.venv/bin/pip install -r pi5_assistant/requirements.txt
+sudo systemctl start mosquitto
+./pi5_assistant/run_all.sh
+```
+
+Open the printed URL in a browser. Over Tailscale this is normally
+`http://pi5.tail16161d.ts.net:8080`. The dashboard shows the camera preview
+with object-detection boxes, the latest VLM scene answer, and the latest LLM
+response. Press `Ctrl-C` in the startup terminal to stop all services started
+by the script. Logs are written to `logs/` at the repository root.
+
 ## Developing & Extending
 
 ### Adding a new tool (LLM → hardware)

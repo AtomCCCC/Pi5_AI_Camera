@@ -14,7 +14,8 @@ class MQTTClient:
         self.client.loop_start()
 
     def publish(self, topic: str, payload: dict):
-        self.client.publish(topic, json.dumps(payload))
+        """Publish a JSON object and return the paho publish result."""
+        return self.client.publish(topic, json.dumps(payload))
 
     def subscribe(self, topic: str, callback):
         def _on_message(_client, _userdata, msg):

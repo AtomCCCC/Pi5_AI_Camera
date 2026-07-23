@@ -8,6 +8,12 @@ camera:
   flip_horizontal: false
   flip_vertical: false
 
+  # Dynamic FPS/resolution adjustment
+  # Camera Module 3 supports multi-resolution streaming.
+  # YOLO on Hailo-10H handles up to 430+ FPS @ 640×640,
+  # so we adjust camera capture resolution & framerate by motion:
+  #   High motion → 640×320 @ 60fps (wider FOV, faster capture)
+  #   Low motion  → 640×640 @ 30fps (full quality, stable)
   dynamic_adjust:
     enabled: true
     check_interval: 0.5        # seconds between motion checks
@@ -32,8 +38,10 @@ detection:
 
 vlm:
   mode: "hailo"               # "hailo" (Path A) or "qwen-cpu" (Path B)
+  # Path A: Hailo
   hailo_app: "hailo_apps.python.gen_ai_apps.vlm_chat.vlm_chat"
   hailo_input: "rpi"          # "rpi" or "usb"
+  # Path B: Qwen2.5-VL
   qwen_model: "qwen2.5vl:3b"
   qwen_timeout: 30
 
@@ -45,4 +53,10 @@ mqtt:
   port: 1883
   topic_query: "vision/query"
   topic_result: "vision/result"
+  topic_detect: "vision/detect"
+  topic_detect_result: "vision/detect_result"
+  topic_detections: "vision/detections"
+  topic_frame: "vision/frame"
   topic_fps_status: "vision/fps/status"
+  frame_publish_interval: 0.2
+  
