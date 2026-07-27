@@ -5,7 +5,7 @@
 > **Status:** Development — merged vision branch updates (continuous detection thread + YOLOv8m COCO parsing) with LLM backends and GPIO pipeline validated on hardware  
 > **Hardware:** Pi 5 (8GB) + AI HAT+ 2 (Hailo-10H, 40 TOPS) + Camera Module 3
 
-### Latest Progress (2026-07-10)
+### Latest Progress. (2026-07-10)
 
 - Merged branch `Vison_LLM_Destect` into `main`.
 - Vision service now uses the threaded detection pipeline (`start()` / `stop()`) in `vision_service/main.py`.
