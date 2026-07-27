@@ -14,6 +14,13 @@ import numpy as np
 import base64
 import logging
 import threading
+from pathlib import Path
+
+# KAN: adaptive controller utilities
+try:
+    from vision_service.student_kan_new import load_kan, compute_s_id, kan_infer
+except ImportError:
+    from student_kan_new import load_kan, compute_s_id, kan_infer
 
 
 logger = logging.getLogger(__name__)
@@ -50,6 +57,11 @@ class DetectionPipeline:
             "topic_fps_status",
             "vision/fps/status"
         )
+
+        # KAN: load the adaptive controller (pure numpy, no torch)
+        kan_weights = Path(__file__).with_name("kan_weights.npz")
+        self.kan = load_kan(str(kan_weights))
+        self.last_s_id = 0.0
 
     def _init_hailo(self):
         """Lazy-init Hailo-10H infer model (called once on first process_frame)."""
@@ -90,10 +102,16 @@ class DetectionPipeline:
 
         return motion_score
 
-    def select_profile(self, motion_score):
-        if motion_score > self.motion_threshold:
-            return "high_motion"
-        return "low_motion"
+    def select_profile(self, detections, frame_w, frame_h):
+        # KAN-based decision (replaces the old motion-threshold rule)
+        s_id = compute_s_id(detections, frame_w, frame_h)
+        delta_s_id = abs(s_id - self.last_s_id)
+        self.last_s_id = s_id
+
+        if self.kan is None:                      # fallback if weights missing
+            return "low_motion"
+        alpha = kan_infer(self.kan, s_id, delta_s_id)
+        return "high_motion" if alpha > 0.5 else "low_motion"
 
     def _capture_frame(self, w, h):
         """Capture a single frame via rpicam-jpeg."""
@@ -231,13 +249,14 @@ class DetectionPipeline:
 
         motion_score = self.estimate_motion(frame)
 
+        # KAN: run inference first so we can compute semantic density from detections
+        detections = self._infer(frame)
+
         now = time.time()
         if self.enabled and now - self.last_check_time >= self.check_interval:
-            self.current_profile = self.select_profile(motion_score)
+            self.current_profile = self.select_profile(detections, w, h)   # KAN decision
             self.publish_fps_status(motion_score)
             self.last_check_time = now
-
-        detections = self._infer(frame)
 
         self.shared_buffer.update(detections, frame=frame)
         self._publish_annotated_frame(frame, detections)
