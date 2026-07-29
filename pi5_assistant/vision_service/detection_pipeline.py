@@ -8,12 +8,13 @@ does not work with Pi Camera Module 3's libcamera backend.
 
 import time
 import cv2
-import json
+import math
 import subprocess as sp
 import numpy as np
 import base64
 import logging
 import threading
+from pathlib import Path
 
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ class DetectionPipeline:
 
         camera_cfg = config["camera"]
         dynamic_cfg = camera_cfg["dynamic_adjust"]
+        detection_cfg = config["detection"]
 
         self.enabled = dynamic_cfg.get("enabled", True)
         self.check_interval = dynamic_cfg.get("check_interval", 0.5)
@@ -43,29 +45,74 @@ class DetectionPipeline:
         self.previous_gray = None
         self._running = False
         self._thread = None
+        self.hef_path = Path(detection_cfg.get(
+            "hef_path",
+            "/usr/local/hailo/resources/models/hailo10h/"
+            "hailo_yolov8n_4_classes_vga.hef",
+        )).expanduser()
+        self.class_names = detection_cfg.get(
+            "labels",
+            ["person", "bicycle", "car", "motorcycle"],
+        )
+        if not isinstance(self.class_names, list) or not self.class_names:
+            raise ValueError("detection.labels must be a non-empty list")
+        self.input_color_order = str(
+            detection_cfg.get("input_color_order", "rgb")
+        ).lower()
+        if self.input_color_order not in {"rgb", "bgr"}:
+            raise ValueError("detection.input_color_order must be 'rgb' or 'bgr'")
         self._last_frame_publish = 0.0
         self.frame_publish_interval = config["mqtt"].get("frame_publish_interval", 0.2)
+
+        roi_cfg = config.get("roi", {})
+        self.roi_enabled = bool(roi_cfg.get("enabled", False))
+        self.roi_max_regions = int(roi_cfg.get("max_regions", 1))
+        self.roi_padding_ratio = float(roi_cfg.get("padding_ratio", 0.05))
+        self.roi_max_dimension = int(roi_cfg.get("max_dimension", 320))
+        self.roi_jpeg_quality = int(roi_cfg.get("jpeg_quality", 80))
+        self.roi_publish_interval = float(
+            roi_cfg.get("publish_interval", self.frame_publish_interval)
+        )
+        self.topic_roi = config["mqtt"].get("topic_roi", "vision/roi")
+        self._last_roi_publish = 0.0
+        self._validate_roi_config()
 
         self.topic_fps_status = config["mqtt"].get(
             "topic_fps_status",
             "vision/fps/status"
         )
 
+    def _validate_roi_config(self):
+        if self.roi_max_regions < 1:
+            raise ValueError("roi.max_regions must be at least 1")
+        if not 0 <= self.roi_padding_ratio <= 1:
+            raise ValueError("roi.padding_ratio must be between 0 and 1")
+        if self.roi_max_dimension < 1:
+            raise ValueError("roi.max_dimension must be at least 1")
+        if not 1 <= self.roi_jpeg_quality <= 100:
+            raise ValueError("roi.jpeg_quality must be between 1 and 100")
+        if self.roi_publish_interval < 0:
+            raise ValueError("roi.publish_interval cannot be negative")
+
     def _init_hailo(self):
-        """Lazy-init Hailo-10H infer model (called once on first process_frame)."""
+        """Initialize the configured Hailo-10H model once."""
         if self._configured_model is not None:
             return
 
         from hailo_platform import VDevice, HailoSchedulingAlgorithm
 
-        hef_path = "/usr/local/hailo/resources/models/hailo10h/hailo_yolov8n_4_classes_vga.hef"
+        if not self.hef_path.is_file():
+            raise FileNotFoundError(
+                f"Hailo HEF not found: {self.hef_path}. "
+                "Set detection.hef_path in vision_service/config.yaml."
+            )
 
         params = VDevice.create_params()
         params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
         params.group_id = "SHARED"
         self._vdevice = VDevice(params)
 
-        infer_model = self._vdevice.create_infer_model(hef_path)
+        infer_model = self._vdevice.create_infer_model(str(self.hef_path))
         infer_model.set_batch_size(1)
 
         input_stream = infer_model.inputs[0]
@@ -110,8 +157,10 @@ class DetectionPipeline:
         """Run Hailo YOLO inference on a frame. Returns list of detections."""
         self._init_hailo()
 
-        resized = cv2.resize(frame, (self._model_w, self._model_h))
-        input_batch = np.expand_dims(resized.astype(np.uint8), 0)
+        model_frame = cv2.resize(frame, (self._model_w, self._model_h))
+        if self.input_color_order == "rgb":
+            model_frame = cv2.cvtColor(model_frame, cv2.COLOR_BGR2RGB)
+        input_batch = np.expand_dims(model_frame.astype(np.uint8), 0)
 
         out = {name: np.empty(buf.shape, dtype=buf.dtype) for name, buf in self._output_buffers.items()}
         b = self._configured_model.create_bindings(output_buffers=out)
@@ -119,30 +168,48 @@ class DetectionPipeline:
         self._configured_model.run([b], timeout=10000)
 
         raw = out[list(out.keys())[0]]
-        return self._postprocess(raw)
+        return self._postprocess(raw, frame.shape)
 
-    def _postprocess(self, raw: np.ndarray) -> list[dict]:
-        """Parse HAILO_NMS_BY_CLASS output from hailo_yolov8n_4_classes_vga."""
+    def _postprocess(self, raw: np.ndarray, frame_shape) -> list[dict]:
+        """Parse normalized HAILO_NMS_BY_CLASS output into pixel ``xywh`` boxes."""
         conf_threshold = self.config["detection"]["confidence"]
-        class_names = ["person", "car", "bicycle", "motorcycle"]
+        frame_height, frame_width = frame_shape[:2]
 
         data = raw.ravel()
         idx = 0
         detections = []
-        for class_id in range(4):
+        for class_id, class_name in enumerate(self.class_names):
+            if idx >= len(data):
+                logger.warning("Truncated Hailo NMS output at class %s", class_id)
+                break
             count = int(data[idx])
             idx += 1
             if count <= 0:
                 continue
+            available = (len(data) - idx) // 5
+            if count > available:
+                logger.warning(
+                    "Hailo NMS class %s reports %s boxes but only %s are available",
+                    class_id, count, available
+                )
+                count = available
             bboxes = data[idx:idx + count * 5].reshape(-1, 5)
             idx += count * 5
-            for x1, y1, x2, y2, conf in bboxes:
+            for y_min, x_min, y_max, x_max, conf in bboxes:
                 if conf >= conf_threshold:
+                    x1 = max(0, min(frame_width, round(float(x_min) * frame_width)))
+                    y1 = max(0, min(frame_height, round(float(y_min) * frame_height)))
+                    x2 = max(0, min(frame_width, round(float(x_max) * frame_width)))
+                    y2 = max(0, min(frame_height, round(float(y_max) * frame_height)))
+                    width = x2 - x1
+                    height = y2 - y1
+                    if width <= 0 or height <= 0:
+                        continue
                     detections.append({
                         "class": class_id,
-                        "name": class_names[class_id],
+                        "name": class_name,
                         "confidence": round(float(conf), 3),
-                        "bbox": [int(x1), int(y1), int(x2 - x1), int(y2 - y1)],
+                        "bbox": [x1, y1, width, height],
                     })
         return detections
 
@@ -150,6 +217,9 @@ class DetectionPipeline:
         """Start continuous capture and inference in a background thread."""
         if self._running:
             return
+        # Fail synchronously on a missing/incompatible HEF instead of leaving a
+        # background loop that only logs one retry per second.
+        self._init_hailo()
         self._running = True
         self._thread = threading.Thread(
             target=self._run_loop, name="vision-pipeline", daemon=True
@@ -176,7 +246,7 @@ class DetectionPipeline:
                 if remaining > 0:
                     time.sleep(remaining)
 
-    def _publish_annotated_frame(self, frame, detections):
+    def _publish_annotated_frame(self, frame, detections, timestamp):
         """Publish a JPEG preview for the dashboard without exposing the camera."""
         if self.mqtt_client is None:
             return
@@ -196,11 +266,112 @@ class DetectionPipeline:
         if not ok:
             return
         self.mqtt_client.publish(self.config["mqtt"]["topic_frame"], {
-            "image_b64": base64.b64encode(encoded).decode("ascii"),
-            "timestamp": time.time(),
+            "image_b64": base64.b64encode(encoded.tobytes()).decode("ascii"),
+            "timestamp": timestamp,
             "detections": detections,
         })
         self._last_frame_publish = now
+
+    def _crop_bounds(self, bbox, frame_width, frame_height):
+        """Return a padded, clipped ``[x, y, width, height]`` crop."""
+        try:
+            x, y, width, height = (float(value) for value in bbox)
+        except (TypeError, ValueError):
+            return None
+        if not all(math.isfinite(value) for value in (x, y, width, height)):
+            return None
+        if width <= 0 or height <= 0:
+            return None
+
+        pad_x = width * self.roi_padding_ratio
+        pad_y = height * self.roi_padding_ratio
+        x1 = max(0, math.floor(x - pad_x))
+        y1 = max(0, math.floor(y - pad_y))
+        x2 = min(frame_width, math.ceil(x + width + pad_x))
+        y2 = min(frame_height, math.ceil(y + height + pad_y))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return [x1, y1, x2 - x1, y2 - y1]
+
+    def _encode_roi(self, frame, detection, index):
+        frame_height, frame_width = frame.shape[:2]
+        crop_bbox = self._crop_bounds(
+            detection.get("bbox"), frame_width, frame_height
+        )
+        if crop_bbox is None:
+            return None
+
+        x, y, width, height = crop_bbox
+        roi_frame = frame[y:y + height, x:x + width]
+        if roi_frame.size == 0:
+            return None
+
+        roi_height, roi_width = roi_frame.shape[:2]
+        largest_dimension = max(roi_width, roi_height)
+        if largest_dimension > self.roi_max_dimension:
+            scale = self.roi_max_dimension / largest_dimension
+            output_width = max(1, round(roi_width * scale))
+            output_height = max(1, round(roi_height * scale))
+            roi_frame = cv2.resize(
+                roi_frame, (output_width, output_height),
+                interpolation=cv2.INTER_AREA
+            )
+
+        ok, encoded = cv2.imencode(
+            ".jpg", roi_frame,
+            [cv2.IMWRITE_JPEG_QUALITY, self.roi_jpeg_quality]
+        )
+        if not ok:
+            return None
+
+        encoded_height, encoded_width = roi_frame.shape[:2]
+        return {
+            "index": index,
+            "class": detection.get("class"),
+            "name": detection.get("name", "unknown"),
+            "confidence": float(detection.get("confidence", 0.0)),
+            "bbox": list(detection["bbox"]),
+            "crop_bbox": crop_bbox,
+            "image_size": {
+                "width": encoded_width,
+                "height": encoded_height,
+            },
+            "mime_type": "image/jpeg",
+            "image_b64": base64.b64encode(encoded.tobytes()).decode("ascii"),
+        }
+
+    def _publish_roi_images(self, frame, detections, timestamp):
+        """Publish confidence-ranked object crops as one atomic MQTT message."""
+        if not self.roi_enabled or self.mqtt_client is None:
+            return
+
+        now = time.monotonic()
+        if now - self._last_roi_publish < self.roi_publish_interval:
+            return
+
+        ranked = sorted(
+            detections,
+            key=lambda detection: float(detection.get("confidence", 0.0)),
+            reverse=True,
+        )
+        rois = []
+        for detection in ranked:
+            roi = self._encode_roi(frame, detection, len(rois))
+            if roi is not None:
+                rois.append(roi)
+            if len(rois) >= self.roi_max_regions:
+                break
+
+        frame_height, frame_width = frame.shape[:2]
+        self.mqtt_client.publish(self.topic_roi, {
+            "timestamp": timestamp,
+            "frame_size": {
+                "width": frame_width,
+                "height": frame_height,
+            },
+            "rois": rois,
+        })
+        self._last_roi_publish = now
 
     def publish_fps_status(self, motion_score):
         if self.mqtt_client is None:
@@ -239,14 +410,16 @@ class DetectionPipeline:
 
         detections = self._infer(frame)
 
+        frame_timestamp = time.time()
         self.shared_buffer.update(detections, frame=frame)
-        self._publish_annotated_frame(frame, detections)
+        self._publish_annotated_frame(frame, detections, frame_timestamp)
+        self._publish_roi_images(frame, detections, frame_timestamp)
         if self.mqtt_client is not None:
             self.mqtt_client.publish(self.config["mqtt"]["topic_detections"], {
                 "detections": detections,
                 "motion_profile": self.current_profile,
                 "motion_score": round(motion_score, 2),
-                "timestamp": time.time(),
+                "timestamp": frame_timestamp,
             })
 
         return detections
