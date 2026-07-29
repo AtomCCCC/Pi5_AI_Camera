@@ -109,11 +109,11 @@ sudo systemctl enable mosquitto
 # 2. Clone and setup
 git clone https://github.com/AtomCCCC/Pi5_AI_Camera.git
 cd Pi5_AI_Camera
-python3 -m venv .venv
+python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
 
 # 3. Install Python dependencies
-pip install -r requirements.txt
+pip install -r pi5_assistant/requirements.txt
 
 # 4. Export environment
 export DEEPSEEK_API_KEY="your_key_here"   # Required for online LLM
@@ -122,6 +122,7 @@ export DEEPSEEK_API_KEY="your_key_here"   # Required for online LLM
 sudo systemctl start mosquitto           # MQTT broker
 sudo systemctl start hailo-ollama-proxy  # NPU proxy on :8000
 
+cd pi5_assistant
 python -m voice_service.main             # Voice I/O
 python -m vision_service.main            # Camera + YOLO + VLM
 python -m llm_orchestrator.main          # AI reasoning
@@ -143,9 +144,17 @@ sudo systemctl start mosquitto
 
 Open the printed URL in a browser. Over Tailscale this is normally
 `http://pi5.tail16161d.ts.net:8080`. The dashboard shows the camera preview
-with object-detection boxes, the latest VLM scene answer, and the latest LLM
-response. Press `Ctrl-C` in the startup terminal to stop all services started
-by the script. Logs are written to `logs/` at the repository root.
+with object-detection boxes, live ROI crops received from MQTT, the latest VLM
+scene answer, and the latest LLM response. Press `Ctrl-C` in the startup
+terminal to stop all services started by the script. Logs are written to
+`logs/` at the repository root.
+
+ROI behavior is configured in `vision_service/config.yaml`. `max_regions`
+selects how many confidence-ranked detections are sent per update (set it to
+`1` for a single ROI), `padding_ratio` adds context around each box, and
+`max_dimension` limits the JPEG size before Base64/MQTT transport. The
+dashboard subscribes to `vision/roi` by default; if the topic is changed, set
+the dashboard environment variable `MQTT_TOPIC_ROI` to the same value.
 
 ## Developing & Extending
 
@@ -181,6 +190,8 @@ Each service has its own **`config.yaml`** — edit directly for:
 | `vision/detect_result` | Vision Service | LLM Orchestrator | `{detections[...], session_id}` |
 | `vision/query` | LLM Orchestrator | Vision Service | `{prompt, session_id}` |
 | `vision/result` | Vision Service | LLM Orchestrator | `{description, session_id}` |
+| `vision/frame` | Vision Service | Dashboard | `{image_b64, timestamp, detections}` |
+| `vision/roi` | Vision Service | Dashboard | `{timestamp, frame_size, rois:[{name, confidence, bbox, crop_bbox, image_b64}]}` |
 | `gpio/command` | LLM Orchestrator | GPIO Service | `{type, ...params, session_id}` |
 | `session/create` | Session Manager | (broadcast) | `{session_id, reason}` |
 | `session/end` | Session Manager | (broadcast) | `{session_id, reason}` |
