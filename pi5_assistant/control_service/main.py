@@ -9,7 +9,7 @@ decision layer in between — the one thing no other service provides.
 Subscribes:  vision/detect_result
 Publishes:   gpio/command      one message per servo: {type:"servo", servo, angle, session_id}
              control/status    {mode, note, latency_ms, session_id}   (dashboard)
-             control/power_mode {active: bool}   (lets Vision throttle framerate → power saving)
+             control/power_mode {active: bool}   (lets Vision throttle framerate -> power saving)
 
 Run:  python -m control_service.main
 """
@@ -29,6 +29,11 @@ from control_service.control_loop import ControlPolicy, GimbalController, Detect
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("control_service")
 
+# The Vision service reports bounding boxes in PIXELS relative to its YOLO
+# input frame. We divide by this to normalise to 0..1 for the control policy.
+# NOTE: confirm 640x640 with the Vision service owner (high-motion mode is 640x320).
+FRAME_W, FRAME_H = 640, 640
+
 
 class ControlService:
     def __init__(self, config_path=None):
@@ -37,12 +42,12 @@ class ControlService:
             self.cfg = yaml.safe_load(f)
 
         m = self.cfg["mqtt"]
-        self.t_in    = m["topic_detect_result"]
-        self.t_gpio  = m["topic_gpio_command"]
+        self.t_in     = m["topic_detect_result"]
+        self.t_gpio   = m["topic_gpio_command"]
         self.t_status = m["topic_status"]
-        self.t_power = m["topic_power_mode"]
-        self.pan_ch  = self.cfg["servo"]["pan_channel"]
-        self.tilt_ch = self.cfg["servo"]["tilt_channel"]
+        self.t_power  = m["topic_power_mode"]
+        self.pan_ch   = self.cfg["servo"]["pan_channel"]
+        self.tilt_ch  = self.cfg["servo"]["tilt_channel"]
 
         self.mqtt = MQTTClient("control", m["broker"], m["port"])
         self.policy = ControlPolicy()
@@ -68,14 +73,17 @@ class ControlService:
         t0 = time.perf_counter_ns()
 
         # incoming JSON -> your Detection objects
+        # Vision service fields: "name" (not "label") and bbox in PIXELS [x,y,w,h].
         detections = []
         for d in payload.get("detections", []):
-            box = d.get("bbox", [0, 0, 0, 0])         # [x, y, w, h] normalised
+            box = d.get("bbox", [0, 0, 0, 0])
             detections.append(Detection(
-                label=d.get("label", d.get("class", "")),
+                label=d.get("name", d.get("label", d.get("class", ""))),
                 confidence=float(d.get("confidence", 0.0)),
-                x=float(box[0]), y=float(box[1]),
-                w=float(box[2]), h=float(box[3]),
+                x=float(box[0]) / FRAME_W,
+                y=float(box[1]) / FRAME_H,
+                w=float(box[2]) / FRAME_W,
+                h=float(box[3]) / FRAME_H,
             ))
 
         # YOUR unchanged decision + PID
