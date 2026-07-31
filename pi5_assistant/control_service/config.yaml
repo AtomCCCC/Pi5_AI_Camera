@@ -1,0 +1,18 @@
+# Control Service Configuration
+# ─────────────────────────────
+# Role 4 — the tracking decision + PID that turns detections into servo angles.
+
+mqtt:
+  broker: "localhost"
+  port: 1883
+  topic_detect_result: "vision/detect_result"   # SUBSCRIBE — detections in (Vision service)
+  topic_gpio_command:  "gpio/command"            # PUBLISH  — servo angles out (GPIO service)
+  topic_status:        "control/status"          # PUBLISH  — mode/latency for the dashboard
+  topic_power_mode:    "control/power_mode"      # PUBLISH  — active/idle hint for power saving
+
+servo:
+  pan_channel: 1        # matches gpio_service servo1
+  tilt_channel: 2       # matches gpio_service servo2
+
+control:
+  confidence_threshold: 0.65
