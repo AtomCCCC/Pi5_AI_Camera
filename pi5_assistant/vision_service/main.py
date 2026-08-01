@@ -69,6 +69,8 @@ class VisionService:
     def _on_detect(self, payload):
         """Return the latest detector result without re-running inference."""
         requested_classes = set(payload.get("classes", []))
+        if requested_classes:
+            self.pipeline.set_target_classes(requested_classes)
         minimum_confidence = float(payload.get("min_confidence", 0.5))
         session_id = payload.get("session_id", "unknown")
         snapshot = self.buffer.get()
