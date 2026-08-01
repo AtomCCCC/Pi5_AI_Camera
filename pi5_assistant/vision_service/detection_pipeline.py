@@ -62,6 +62,10 @@ class DetectionPipeline:
         kan_weights = Path(__file__).with_name("kan_weights.npz")
         self.kan = load_kan(str(kan_weights))
         self.last_s_id = 0.0
+        self.target_classes = [] 
+        
+    def set_target_classes(self, classes):
+         self.target_classes = list(classes)
 
     def _init_hailo(self):
         """Lazy-init Hailo-10H infer model (called once on first process_frame)."""
@@ -101,9 +105,12 @@ class DetectionPipeline:
         self.previous_gray = gray
 
         return motion_score
-
+        
     def select_profile(self, detections, frame_w, frame_h):
         # KAN-based decision (replaces the old motion-threshold rule)
+        if self.target_classes:
+            detections = [d for d in detections
+                          if d.get("name") in self.target_classes]
         s_id = compute_s_id(detections, frame_w, frame_h)
         delta_s_id = abs(s_id - self.last_s_id)
         self.last_s_id = s_id
