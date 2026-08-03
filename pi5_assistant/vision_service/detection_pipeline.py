@@ -107,7 +107,7 @@ class DetectionPipeline:
 
         return motion_score
         
-     def select_profile(self, detections, frame_w, frame_h):
+    def select_profile(self, detections, frame_w, frame_h):
         if self.target_classes:
             detections = [d for d in detections
                           if d.get("name") in self.target_classes]
