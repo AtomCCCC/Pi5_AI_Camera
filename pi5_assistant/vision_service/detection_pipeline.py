@@ -108,7 +108,6 @@ class DetectionPipeline:
         return motion_score
         
      def select_profile(self, detections, frame_w, frame_h):
-        # KAN-based decision with hysteresis
         if self.target_classes:
             detections = [d for d in detections
                           if d.get("name") in self.target_classes]
@@ -120,10 +119,8 @@ class DetectionPipeline:
             return self.current_profile
 
         alpha = kan_infer(self.kan, s_id, delta_s_id)
-        self.last_alpha = alpha        # store for display
+        self.last_alpha = alpha
 
-        # Hysteresis: only switch when alpha clearly crosses a threshold;
-        # hold the current profile in the 0.4-0.6 dead band to avoid flapping
         if alpha > 0.6:
             self.current_profile = "high_motion"
         elif alpha < 0.4:
