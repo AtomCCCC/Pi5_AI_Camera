@@ -91,6 +91,3 @@ def load_kan(weights_path="kan_weights.npz"):
 def kan_infer(model, s_id: float, delta_s_id: float) -> float:
     inp = np.array([[s_id, delta_s_id]], dtype=np.float32)
     return float(model(inp)[0][0])
-    # def select_profile(self, s_id, delta_s_id):
-    # alpha = kan_infer(self.kan, s_id, delta_s_id)
-    # return "high_motion" if alpha > 0.5 else "low_motion"
