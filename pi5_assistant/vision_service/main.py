@@ -1,8 +1,8 @@
 """Vision Service — main entry point.
 
-Starts the continuous detection pipeline on Hailo-10H.
-Subscribes to vision/query for on-demand VLM analysis.
-Publishes results to vision/result.
+Starts the continuous detection pipeline (YOLO + KAN adaptive controller).
+Subscribes to vision/detect (sets the KAN target class) and vision/query (VLM).
+Publishes detection and VLM results back over MQTT.
 """
 
 import sys
