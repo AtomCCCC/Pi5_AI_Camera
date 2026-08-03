@@ -62,6 +62,7 @@ class DetectionPipeline:
         kan_weights = Path(__file__).with_name("kan_weights.npz")
         self.kan = load_kan(str(kan_weights))
         self.last_s_id = 0.0
+        self.last_alpha = 0.0
         self.target_classes = [] 
         
     def set_target_classes(self, classes):
@@ -106,8 +107,8 @@ class DetectionPipeline:
 
         return motion_score
         
-    def select_profile(self, detections, frame_w, frame_h):
-        # KAN-based decision (replaces the old motion-threshold rule)
+     def select_profile(self, detections, frame_w, frame_h):
+        # KAN-based decision with hysteresis
         if self.target_classes:
             detections = [d for d in detections
                           if d.get("name") in self.target_classes]
@@ -115,11 +116,20 @@ class DetectionPipeline:
         delta_s_id = abs(s_id - self.last_s_id)
         self.last_s_id = s_id
 
-        if self.kan is None:                      # fallback if weights missing
-            return "low_motion"
-        alpha = kan_infer(self.kan, s_id, delta_s_id)
-        return "high_motion" if alpha > 0.5 else "low_motion"
+        if self.kan is None:
+            return self.current_profile
 
+        alpha = kan_infer(self.kan, s_id, delta_s_id)
+        self.last_alpha = alpha        # store for display
+
+        # Hysteresis: only switch when alpha clearly crosses a threshold;
+        # hold the current profile in the 0.4-0.6 dead band to avoid flapping
+        if alpha > 0.6:
+            self.current_profile = "high_motion"
+        elif alpha < 0.4:
+            self.current_profile = "low_motion"
+        return self.current_profile
+         
     def _capture_frame(self, w, h):
         """Capture a single frame via rpicam-jpeg."""
         result = sp.run(
