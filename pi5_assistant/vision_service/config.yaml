@@ -32,9 +32,22 @@ camera:
 detection:
   backend: "hailo"            # "hailo" | "ncnn" | "opencv"
   model: "yolov8n"            # yolov8n / yolov8s / yolov8m
+  hef_path: "/usr/local/hailo/resources/models/hailo10h/hailo_yolov8n_4_classes_vga.hef"
+  input_color_order: "rgb"     # OpenCV capture is BGR; this HEF expects RGB
+  labels: ["person", "bicycle", "car", "motorcycle"]
   confidence: 0.5
   iou_threshold: 0.45
   classes: []                 # Empty = all classes
+
+# Dynamic ROI crops follow the highest-confidence detections.
+# Set max_regions to 1 when only one ROI image is required.
+roi:
+  enabled: true
+  max_regions: 1             # Increase for multiple simultaneous ROI images
+  padding_ratio: 0.08         # Extra border around each detection
+  max_dimension: 320          # Downscale crops to control MQTT payload size
+  jpeg_quality: 80
+  publish_interval: 0.2       # seconds (5 ROI updates per second)
 
 vlm:
   mode: "hailo"               # "hailo" (Path A) or "qwen-cpu" (Path B)
@@ -57,6 +70,7 @@ mqtt:
   topic_detect_result: "vision/detect_result"
   topic_detections: "vision/detections"
   topic_frame: "vision/frame"
+  topic_roi: "vision/roi"
   topic_fps_status: "vision/fps/status"
   frame_publish_interval: 0.2
   

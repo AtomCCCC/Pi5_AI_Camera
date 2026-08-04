@@ -77,6 +77,7 @@ Continuous real-time camera pipeline running in a background thread. Provides ob
 6. **LLM Requests Detection** — When the LLM calls `visual_detect`, the handler reads the buffer instantly (no re-inference, ~1ms).
 7. **LLM Requests VLM** — When the LLM calls `vlm_query`, the handler grabs the latest frame from the buffer and runs the VLM. Path A runs on Hailo NPU (fast, zero CPU). Path B runs Qwen2.5-VL-3B on CPU (slower fallback).
 8. **Result Published** — The VLM description is published to `vision/result` for the LLM to consume as a tool response.
+9. **ROI Published** — The highest-confidence detections are clipped to the source frame, padded, resized if needed, JPEG encoded, and published together on `vision/roi`. An empty `rois` list clears stale dashboard images when a frame has no detections.
 
 ### Dynamic Camera Profiles
 
@@ -97,6 +98,16 @@ YOLO always receives a 640×640 frame (resized from whatever the camera captured
 | Publish | `vision/detect_result` | `{detections: [{class, conf, bbox}], session_id}` | ← immediately |
 | Subscribe | `vision/query` | `{prompt, session_id}` | LLM requests VLM |
 | Publish | `vision/result` | `{description, session_id}` | ← after VLM inference |
+| Publish | `vision/frame` | `{image_b64, timestamp, detections}` | Dashboard preview interval |
+| Publish | `vision/roi` | `{timestamp, frame_size, rois: [...]}` | ROI interval, including empty updates |
+
+### ROI payload
+
+Each entry in `rois` contains the source detection `bbox` in pixel
+`[x, y, width, height]` format, the padded/clipped `crop_bbox`, class metadata,
+encoded image dimensions, MIME type, and a Base64 JPEG in `image_b64`.
+`roi.max_regions`, `padding_ratio`, `max_dimension`, `jpeg_quality`, and
+`publish_interval` are configurable in `config.yaml`.
 
 ## Design
 
@@ -111,6 +122,9 @@ The VLM only runs on-demand when the LLM calls `vlm_query`. The current camera f
 
 ## Extending
 
-- **Switch YOLO model**: place new `.hef` file and update `config.yaml`
+- **Switch YOLO model**: place the `.hef` file on the Pi, then update
+  `detection.hef_path`, `detection.labels`, and `input_color_order` in
+  `config.yaml` together. Startup fails with a clear path error if the HEF is
+  missing.
 - **Add VLM Path C**: add method to `vlm_engine.py` implementing the interface
 - **Post-processing**: add filters in `detection_pipeline.py` before buffer write
