@@ -1,0 +1,40 @@
+# Raspberry Pi 5 GPIO and two-axis FS90 mount configuration.
+
+mqtt:
+  broker: "localhost"
+  port: 1883
+  topic_command: "gpio/command"
+
+servo:
+  servo1:
+    pin: 18             # BCM GPIO18 (physical pin 12) -> pwm2, pan axis
+    min_pulse: 544      # FS90 starting values; calibrate before full travel
+    center_pulse: 1500
+    max_pulse: 2400
+    pulse_min_angle: 0
+    pulse_center_angle: 90
+    pulse_max_angle: 180
+    freq: 50
+    min_angle: 10       # Conservative mechanical command limits
+    max_angle: 170
+    center_angle: 90
+
+  servo2:
+    pin: 12             # BCM GPIO12 (physical pin 32) -> pwm0, tilt axis
+    min_pulse: 544
+    center_pulse: 1500
+    max_pulse: 2400
+    pulse_min_angle: 0
+    pulse_center_angle: 90
+    pulse_max_angle: 180
+    freq: 50
+    min_angle: 10
+    max_angle: 170
+    center_angle: 90
+
+screen:
+  type: "oled"         # "oled" | "tft" | "hdmi" | "lcd"
+  i2c_addr: 0x3C       # SSD1306 OLED
+  width: 128
+  height: 64
+  font_size: 10

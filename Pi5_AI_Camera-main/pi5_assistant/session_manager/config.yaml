@@ -1,0 +1,15 @@
+# Session Manager Configuration
+# ─────────────────────────────
+
+mqtt:
+  broker: "localhost"
+  port: 1883
+  topic_session_create: "session/create"
+  topic_session_end: "session/end"
+  topic_interrupt: "interrupt"
+  topic_command_out: "command/in"     # forwards user text to LLM orchestrator
+
+session:
+  timeout: 30           # seconds without activity before auto-end
+  max_history: 10       # max stored conversation turns per session
+  interrupt_behavior: "new_session"   # "new_session" | "continue"

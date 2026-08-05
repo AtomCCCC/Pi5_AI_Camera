@@ -1,0 +1,28 @@
+# Voice Service Configuration
+# ────────────────────────
+
+mic_device: "plughw:1,0"       # ALSA device for USB microphone
+
+wake_word:
+  model: "hey_raspberry"        # OpenWakeWord model name
+  sensitivity: 0.5              # 0.0 (strict) to 1.0 (lenient)
+  audio_buffer_seconds: 5       # Circular buffer duration
+
+stt:
+  engine: "faster-whisper"      # "faster-whisper" | "vosk"
+  model_size: "tiny"            # tiny / base / small / medium / large
+  language: "en"
+  compute_type: "int8"          # int8 / float16 / float32
+
+tts:
+  engine: "piper"
+  voice: "en_US-amy-medium"     # Piper voice pack name
+  speed: 1.0
+  volume: 1.0
+
+mqtt:
+  broker: "localhost"
+  port: 1883
+  topic_command_in: "command/in"
+  topic_response_out: "response/out"
+  topic_interrupt: "session/interrupt"
