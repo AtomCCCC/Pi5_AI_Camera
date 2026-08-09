@@ -6,15 +6,20 @@ for a response on vision/result.
 """
 
 import json
+import logging
 import threading
-import time
+
+logger = logging.getLogger(__name__)
 
 
 class VisualDetectHandler:
     """Dispatches visual detection requests to the Vision Service."""
 
-    def __init__(self, mqtt):
+    def __init__(self, mqtt, request_topic="vision/detect",
+                 response_topic="vision/detect_result"):
         self.mqtt = mqtt
+        self.request_topic = request_topic
+        self.response_topic = response_topic
         self._response_event = threading.Event()
         self._response_data = None
 
@@ -24,11 +29,11 @@ class VisualDetectHandler:
         self._response_data = None
 
         # Subscribe for one response
-        self.mqtt.client.subscribe("vision/detect_result")
-        self.mqtt.client.message_callback_add("vision/detect_result",
+        self.mqtt.client.subscribe(self.response_topic)
+        self.mqtt.client.message_callback_add(self.response_topic,
                                                 self._on_result)
 
-        self.mqtt.publish("vision/detect", {
+        self.mqtt.publish(self.request_topic, {
             "classes": arguments.get("classes", []),
             "min_confidence": arguments.get("min_confidence", 0.5),
             "session_id": session_id,
@@ -40,5 +45,9 @@ class VisualDetectHandler:
         return json.dumps({"error": "Vision service timed out"})
 
     def _on_result(self, _client, _userdata, msg):
-        self._response_data = json.loads(msg.payload.decode())
+        try:
+            self._response_data = json.loads(msg.payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            logger.warning("Ignoring invalid vision detection response")
+            return
         self._response_event.set()

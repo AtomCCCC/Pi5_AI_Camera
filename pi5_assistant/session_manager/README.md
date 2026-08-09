@@ -72,9 +72,10 @@ Manages conversation sessions and voice interrupts. Each voice command creates a
 | Direction | Topic | Payload | When |
 |-----------|-------|---------|------|
 | Subscribe | `voice/transcript` | `{text, session_id}` | STT result from Voice Service |
+| Subscribe | `response/out` | `{text, session_id}` | Store the LLM reply in conversation history |
 | Subscribe | `interrupt` | `{}` | New wake word during TTS |
 | Subscribe | `session/create` | `{session_id}` | Internal session creation |
-| Publish | `command/in` | `{text, session_id}` | → LLM Orchestrator |
+| Publish | `command/in` | `{text, session_id, history}` | → LLM Orchestrator |
 | Publish | `tts/stop` | `{}` | → Voice Service (kill speech) |
 | Publish | `session/end` | `{session_id, reason}` | → broadcast |
 

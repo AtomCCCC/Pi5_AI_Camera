@@ -6,7 +6,7 @@ Handles voice I/O: wake word detection, speech-to-text, and text-to-speech. This
 
 | File | Role |
 |------|------|
-| `main.py` | Entry point, subscribes to `response/out` and `tts/stop` / `session/interrupt`, publishes `command/in` |
+| `main.py` | Entry point, subscribes to `response/out` and `tts/stop` / `session/interrupt`, publishes `voice/transcript` |
 | `wake_detector.py` | OpenWakeWord — always-on, 3-8% CPU idle, circular audio buffer |
 | `stt_engine.py` | faster-whisper tiny (default) / Vosk (offline fallback) |
 | `tts_engine.py` | Piper TTS (local, ~200ms per response) |
@@ -49,7 +49,7 @@ Handles voice I/O: wake word detection, speech-to-text, and text-to-speech. This
 1. **Idle** — `wake_detector.py` continuously listens on the microphone for the wake word (e.g. "Hey Raspberry") via OpenWakeWord, maintaining a 5-second circular audio buffer.
 2. **Wake Word Detected** — If TTS is currently playing, the service sets an interrupt flag and stops playback immediately. It then transcribes the buffered audio.
 3. **STT** — `stt_engine.py` sends the audio buffer to faster-whisper (tiny model, int8), which returns transcribed text.
-4. **Publish** — Text is published as `command/in` for the LLM Orchestrator to process.
+4. **Publish** — Text is published as `voice/transcript` for the Session Manager to add to the active conversation.
 5. **Wait for Response** — The service subscribes to `response/out`, waiting for the LLM's final answer.
 6. **TTS** — `tts_engine.py` converts the response text to speech via Piper TTS (local, ~200ms). Each sentence is synthesized and played, checking for interrupt between sentences.
 7. **Speak** — Audio plays out of the speaker. If interrupted by a new wake word, go to step 2.
@@ -58,7 +58,7 @@ Handles voice I/O: wake word detection, speech-to-text, and text-to-speech. This
 
 | Direction | Topic | Payload | When |
 |-----------|-------|---------|------|
-| Publish | `command/in` | `{text, session_id}` | → LLM Orchestrator (after STT) |
+| Publish | `voice/transcript` | `{text, session_id}` | → Session Manager (after STT) |
 | Subscribe | `response/out` | `{text, session_id}` | → speaks the response via TTS |
 | Subscribe | `session/interrupt` | `{}` | → stops current TTS playback |
 | Subscribe | `tts/stop` | `{}` | → stops current TTS playback |

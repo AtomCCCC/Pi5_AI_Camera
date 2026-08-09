@@ -47,7 +47,11 @@ class SessionManager:
         self.mqtt.subscribe(self.cfg["mqtt"]["topic_interrupt"], self._on_interrupt)
 
         # Forward user transcript from voice service to LLM (via command/in)
-        self.mqtt.subscribe("voice/transcript", self._on_user_text)
+        self.mqtt.subscribe(
+            self.cfg["mqtt"].get("topic_voice_transcript", "voice/transcript"),
+            self._on_user_text,
+        )
+        self.mqtt.subscribe(self.cfg["mqtt"]["topic_response_in"], self._on_response)
 
         print("[SESSION] Manager started. Listening for sessions and interrupts...")
 
@@ -83,7 +87,7 @@ class SessionManager:
             return
 
         # Use existing session or create one
-        session_id = self._current_session or str(uuid.uuid4())
+        session_id = self._current_session or payload.get("session_id") or str(uuid.uuid4())
         if not self._current_session:
             self.store.create_session(session_id)
             self._current_session = session_id
@@ -95,8 +99,17 @@ class SessionManager:
         self.mqtt.publish(self.cfg["mqtt"]["topic_command_out"], {
             "text": text,
             "session_id": session_id,
+            "history": self.store.get_context(session_id),
         })
         logger.info(f"[SESSION] Forwarded: {text[:60]}... ({session_id})")
+
+    def _on_response(self, payload):
+        if not isinstance(payload, dict):
+            return
+        session_id = payload.get("session_id")
+        text = payload.get("text")
+        if isinstance(session_id, str) and isinstance(text, str) and text:
+            self.store.add_assistant_message(session_id, text)
 
     def stop(self):
         self.mqtt.stop()

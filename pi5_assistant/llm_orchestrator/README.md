@@ -59,14 +59,14 @@ Central AI reasoning engine — routes to DeepSeek V4 (online) or Qwen via NPU p
 
 1. **Command Received** — `main.py` receives `{text, session_id}` from `command/in`.
 2. **Router Check** — `router.py` pings `api.deepseek.com:443`. If reachable → use DeepSeek V4 Flash (online). If unreachable → use `OllamaClient` which routes through the NPU proxy (`:8000`). The proxy handles plain chat on Hailo-10H NPU (0% CPU) and automatically falls back to CPU Ollama (`:11434`) for tool calls.
-3. **First LLM Call** — Messages = `[system prompt, user text]` + `tools[]`. The LLM either returns text or a tool call.
+3. **First LLM Call** — Messages = `[system prompt, session history]` + `tools[]`. The LLM either returns text or a tool call. Command processing runs on a worker thread so the MQTT network loop can receive tool replies.
 4. **Tool Loop** — If a tool call is returned:
    - The tool name + arguments are matched to a handler in `tool_handlers/`
    - The handler publishes an MQTT request to the target service (Vision or GPIO)
    - The handler waits for the response (blocking with timeout)
    - The tool result is appended to messages as a `tool` role
    - A second LLM call is made with the tool results
-   - Loop until the LLM returns plain text
+   - Loop until the LLM returns plain text (or reaches the configured tool-call limit)
 5. **Response Published** — The final text is published to `response/out` for TTS.
 
 ### Tool Dispatch Map
