@@ -15,6 +15,11 @@ import base64
 import logging
 import threading
 from pathlib import Path
+# KAN: adaptive controller utilities
+try:
+    from vision_service.student_kan_new import load_kan, compute_s_id, kan_infer
+except ImportError:
+    from student_kan_new import load_kan, compute_s_id, kan_infer
 
 
 logger = logging.getLogger(__name__)
@@ -93,6 +98,15 @@ class DetectionPipeline:
             raise ValueError("roi.jpeg_quality must be between 1 and 100")
         if self.roi_publish_interval < 0:
             raise ValueError("roi.publish_interval cannot be negative")
+        # KAN: load the adaptive controller (pure numpy, no torch)
+        kan_weights = Path(__file__).with_name("kan_weights.npz")
+        self.kan = load_kan(str(kan_weights))
+        self.last_s_id = 0.0
+        self.last_alpha = 0.0
+        self.target_classes = []
+
+    def set_target_classes(self, classes):
+        self.target_classes = list(classes)
 
     def _init_hailo(self):
         """Initialize the configured Hailo-10H model once."""
@@ -137,10 +151,25 @@ class DetectionPipeline:
 
         return motion_score
 
-    def select_profile(self, motion_score):
-        if motion_score > self.motion_threshold:
-            return "high_motion"
-        return "low_motion"
+    def select_profile(self, detections, frame_w, frame_h):
+        if self.target_classes:
+            detections = [d for d in detections
+                          if d.get("name") in self.target_classes]
+        s_id = compute_s_id(detections, frame_w, frame_h)
+        delta_s_id = abs(s_id - self.last_s_id)
+        self.last_s_id = s_id
+
+        if self.kan is None:
+            return self.current_profile
+
+        alpha = kan_infer(self.kan, s_id, delta_s_id)
+        self.last_alpha = alpha
+
+        if alpha > 0.6:
+            self.current_profile = "high_motion"
+        elif alpha < 0.4:
+            self.current_profile = "low_motion"
+        return self.current_profile
 
     def _capture_frame(self, w, h):
         """Capture a single frame via rpicam-jpeg."""
@@ -402,13 +431,14 @@ class DetectionPipeline:
 
         motion_score = self.estimate_motion(frame)
 
+        # KAN: run inference first so we can compute semantic density from detections
+        detections = self._infer(frame)
+
         now = time.time()
         if self.enabled and now - self.last_check_time >= self.check_interval:
-            self.current_profile = self.select_profile(motion_score)
+            self.current_profile = self.select_profile(detections, w, h)   # KAN decision
             self.publish_fps_status(motion_score)
             self.last_check_time = now
-
-        detections = self._infer(frame)
 
         frame_timestamp = time.time()
         self.shared_buffer.update(detections, frame=frame)
