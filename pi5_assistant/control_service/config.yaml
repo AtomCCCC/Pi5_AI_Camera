@@ -1,18 +1,53 @@
-# Control Service Configuration
-# ─────────────────────────────
-# Role 4 — the tracking decision + PID that turns detections into servo angles.
+# Closed-loop visual tracking for the two-axis FS90 camera mount.
 
 mqtt:
   broker: "localhost"
   port: 1883
-  topic_detect_result: "vision/detect_result"   # SUBSCRIBE — detections in (Vision service)
-  topic_gpio_command:  "gpio/command"            # PUBLISH  — servo angles out (GPIO service)
-  topic_status:        "control/status"          # PUBLISH  — mode/latency for the dashboard
-  topic_power_mode:    "control/power_mode"      # PUBLISH  — active/idle hint for power saving
-
-servo:
-  pan_channel: 1        # matches gpio_service servo1
-  tilt_channel: 2       # matches gpio_service servo2
+  # Continuous detector output. vision/detect_result is only an on-demand LLM reply.
+  topic_detections:    "vision/detections"
+  topic_gpio_command:  "gpio/command"
+  topic_status:        "control/status"
+  topic_power_mode:    "control/power_mode"
 
 control:
   confidence_threshold: 0.65
+  target_labels: []          # Empty tracks the highest-confidence supported class.
+  min_switch_interval: 0.15
+  empty_frames_to_idle: 3
+  frame_width: 640           # Fallback only; Vision normally sends frame_size.
+  frame_height: 640
+  dt_min: 0.005
+  dt_max: 0.20               # Prevent a pause from causing one large movement.
+  command_interval: 0.03     # At most about 33 servo command updates per second.
+
+servo:
+  pan_channel: 1             # gpio_service servo1 / GPIO18
+  tilt_channel: 2            # gpio_service servo2 / GPIO12
+
+  # PID output is angular velocity in degrees/second. Start with Ki at zero
+  # during physical tuning, then add only enough Ki to remove steady offset.
+  pan:
+    kp: 70.0
+    ki: 2.0
+    kd: 3.0
+    output_limit: 90.0
+    integral_limit: 0.25
+    derivative_filter: 0.20
+    deadband: 0.03
+    min_angle: 10
+    max_angle: 170
+    center_angle: 90
+    direction: 1             # Change to -1 if pan moves away from the target.
+
+  tilt:
+    kp: 70.0
+    ki: 2.0
+    kd: 3.0
+    output_limit: 90.0
+    integral_limit: 0.25
+    derivative_filter: 0.20
+    deadband: 0.03
+    min_angle: 10
+    max_angle: 170
+    center_angle: 90
+    direction: 1             # Change to -1 if tilt moves away from the target.

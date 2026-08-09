@@ -1,86 +1,102 @@
-# Control Service (Role 4)
+# Two-axis FS90 visual PID control
 
-The decision layer between AI detection and the physical camera gimbal.
-Takes object detections, decides what to track, and outputs servo angles.
+This service adds closed-loop pan/tilt tracking to the two-servo camera mount.
+It is intended for the [two-axis SG90/FS90 gimbal design](https://www.thingiverse.com/thing:2892903).
 
-This is the only service that performs **feedback control** — the PID loop that
-keeps a target centred in the frame.
+The feedback signal is the tracked object's position in the camera image. A
+stock FS90 does not expose its internal position sensor, so this is a visual
+outer loop rather than direct joint-angle feedback.
 
-## What it does
+## Data flow
 
-1. Subscribes to detections published by the Vision service
-2. Filters them (confidence gating) and selects a target to track
-3. Runs a dual-axis PID controller to compute pan/tilt angles
-4. Publishes those angles to the GPIO service, which drives the servos
-5. Publishes an active/idle power hint so the Vision service can throttle
-   its framerate when nothing is being tracked
+```text
+Vision service (continuous detections)
+    -> vision/detections
+    -> Control service (pan PID + tilt PID)
+    -> gpio/command
+    -> GPIO service (50 Hz hardware PWM)
+    -> FS90 pan and tilt servos
+```
 
-## MQTT interface
+The control service subscribes to the continuous `vision/detections` stream,
+not the on-demand `vision/detect_result` response used by the LLM tools.
 
-### Subscribes
+## PID behaviour
 
-**`vision/detect_result`** — detections from the Vision service
+- The setpoint is the image centre `(0.5, 0.5)`.
+- PID output is angular velocity in degrees/second and is integrated using the
+  measured frame interval. This keeps motion comparable at 30 and 60 FPS.
+- A centre deadband prevents visible servo chatter.
+- Integral clamping and conditional integration prevent wind-up.
+- The derivative term is low-pass filtered and does not kick on acquisition.
+- Output-rate, time-step, command-rate, and mechanical-angle limits protect the
+  mount from large or stale commands.
+- Pan and tilt directions can be reversed independently in configuration.
+
+## Detection input
+
+`vision/detections` carries pixel boxes and the source dimensions:
+
 ```json
 {
-  "session_id": "abc",
+  "frame_size": {"width": 640, "height": 320},
+  "coordinate_space": "pixels",
   "detections": [
-    { "label": "person", "confidence": 0.90, "bbox": [x, y, w, h] }
+    {"name": "person", "confidence": 0.90, "bbox": [300, 80, 80, 120]}
   ]
 }
 ```
-`bbox` is `[x, y, w, h]` as fractions of the frame (0–1).
 
-### Publishes
+Normalised 0-1 boxes remain supported. Invalid or empty boxes are ignored.
 
-**`gpio/command`** — one message per servo (matches the GPIO service format)
-```json
-{ "type": "servo", "servo": 1, "angle": 95, "session_id": "abc" }
-```
-`servo: 1` = pan, `servo: 2` = tilt. `angle` is 0–180 degrees.
+## Configuration
 
-**`control/status`** — for the dashboard
-```json
-{ "mode": "tracking", "note": "...", "pan": 95, "tilt": 88, "latency_ms": 0.02 }
-```
+Edit `control_service/config.yaml`:
 
-**`control/power_mode`** — active/idle hint (published only on change)
-```json
-{ "active": true }
-```
+- `target_labels`: classes to track; an empty list tracks the most confident
+  supported detection.
+- `kp`, `ki`, `kd`: independent gains for each axis.
+- `output_limit`: maximum commanded angular velocity in degrees/second.
+- `deadband`: accepted centre error as a fraction of image width or height.
+- `min_angle`, `max_angle`, `center_angle`: safe mount travel.
+- `direction`: use `1` or `-1` to match each servo's mounting orientation.
 
-## Files
+Keep the angle limits in `gpio_service/config.yaml` consistent. The GPIO
+limits are the final hardware safety clamp.
 
-| File | Purpose |
-|------|---------|
-| `main.py` | The MQTT service: subscribe, decide, publish |
-| `control_loop.py` | Control policy + PID (the core logic) |
-| `config.yaml` | Broker address and topic names |
-| `__init__.py` | Package marker |
+## Safe first-time tuning
 
-## Running
+1. Power the servos from a suitable external 5 V supply and join its ground to
+   Raspberry Pi ground. Do not drive two loaded servos from the Pi 5 V pin.
+2. Start with the camera mount unloaded or ready to disconnect. Verify that
+   `center_angle` and the min/max angles do not force either linkage.
+3. Put `ki: 0` and `kd: 0`. Point a target slightly away from centre and check
+   that both axes move toward it. Change that axis's `direction` to `-1` if it
+   moves away.
+4. Increase `kp` until tracking is responsive but begins to oscillate, then
+   reduce it by roughly 20-30%.
+5. Increase `kd` gradually to damp overshoot. Increase `deadband` if the FS90s
+   buzz around centre.
+6. Add only a small `ki` if a steady offset remains. Excess integral gain is a
+   common cause of slow oscillation.
 
-Requires an MQTT broker (Mosquitto) on `localhost:1883`.
+The supplied gains are conservative starting values, not final calibration for
+every printed linkage, camera mass, or power supply.
+
+## Run and test
+
+The standard launcher now starts this service:
 
 ```bash
-python -m control_service.main
+./pi5_assistant/run_all.sh
 ```
 
-## Control design
+Run the hardware-independent tests from the repository root:
 
-- **Confidence gating** (0.65) — rejects spurious detections
-- **Hysteresis** — a switching cooldown and a multi-frame dropout debounce
-  prevent unstable rapid mode changes
-- **ROI dilation + smoothing** — a padded, smoothed region of interest
-- **PID** — dual-axis (pan, tilt) with output limiting and integral anti-windup
+```bash
+python -m unittest discover -s tests -v
+```
 
-Measured control-loop latency (standalone characterisation, 238 frames):
-mean 25.42 ms, p95 25.68 ms — of which the control logic itself is ~0.04 %,
-the remainder being NPU inference.
-
-## Notes for integration
-
-- The Vision service must publish detections in the `bbox: [x, y, w, h]`
-  (normalised) format shown above. If its format differs, only the parsing in
-  `_on_detections` needs adjusting.
-- Servo channels (pan = 1, tilt = 2) are set in `config.yaml` and must match
-  the GPIO service's `servo1` / `servo2` pins.
+For true joint-angle PID, stall detection, or load compensation, add external
+angle sensors/encoders (or a servo that exposes feedback) and use those
+measurements as the inner-loop feedback signal.
