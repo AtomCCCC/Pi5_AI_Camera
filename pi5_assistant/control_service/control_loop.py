@@ -40,9 +40,13 @@ class Detection:
     y: float
     w: float
     h: float
+    center_x: float = None
+    center_y: float = None
 
     @property
     def center(self):
+        if self.center_x is not None and self.center_y is not None:
+            return self.center_x, self.center_y
         return (self.x + self.w / 2, self.y + self.h / 2)
 
 
@@ -65,6 +69,9 @@ def detections_from_payload(payload, default_frame_size=(640, 640)):
     Malformed boxes are ignored instead of stopping the control service.
     """
 
+    if not isinstance(payload, dict):
+        return []
+
     frame_size = payload.get("frame_size", default_frame_size)
     if isinstance(frame_size, dict):
         frame_width = frame_size.get("width", default_frame_size[0])
@@ -79,12 +86,28 @@ def detections_from_payload(payload, default_frame_size=(640, 640)):
         frame_height = float(frame_height)
     except (TypeError, ValueError):
         frame_width, frame_height = map(float, default_frame_size)
-    if frame_width <= 0 or frame_height <= 0:
+    if not all(
+        math.isfinite(value) and value > 0
+        for value in (frame_width, frame_height)
+    ):
         frame_width, frame_height = map(float, default_frame_size)
 
     coordinate_space = str(payload.get("coordinate_space", "auto")).lower()
+    # New Vision versions publish the exact detection used for the visible ROI.
+    # Prefer it so the gimbal cannot choose a different object.  Falling back to
+    # the complete list keeps recorded/older payloads compatible.
+    if "tracking_target" in payload:
+        tracking_target = payload.get("tracking_target")
+        items = [tracking_target] if isinstance(tracking_target, dict) else []
+    else:
+        items = payload.get("detections", [])
+    if not isinstance(items, (list, tuple)):
+        return []
+
     result = []
-    for item in payload.get("detections", []):
+    for item in items:
+        if not isinstance(item, dict):
+            continue
         box = item.get("bbox", ())
         if not isinstance(box, (list, tuple)) or len(box) < 4:
             continue
@@ -105,13 +128,49 @@ def detections_from_payload(payload, default_frame_size=(640, 640)):
             x, width = x / frame_width, width / frame_width
             y, height = y / frame_height, height / frame_height
 
+        center_x = center_y = None
+        center_present = "roi_center" in item or "center" in item
+        if center_present:
+            raw_center = item.get("roi_center", item.get("center"))
+            if isinstance(raw_center, dict):
+                raw_center = (raw_center.get("x"), raw_center.get("y"))
+            if isinstance(raw_center, (list, tuple)) and len(raw_center) >= 2:
+                try:
+                    candidate_x, candidate_y = map(float, raw_center[:2])
+                except (TypeError, ValueError):
+                    candidate_x = candidate_y = None
+                if (
+                    candidate_x is not None
+                    and all(math.isfinite(value) for value in (
+                        candidate_x, candidate_y
+                    ))
+                ):
+                    normalised_x, normalised_y = candidate_x, candidate_y
+                    if not normalised:
+                        normalised_x /= frame_width
+                        normalised_y /= frame_height
+                    # Do not turn a corrupt coordinate into a maximum travel
+                    # command. If it lies outside the source frame, retain
+                    # backwards-compatible bbox-centre calculation below.
+                    if 0.0 <= normalised_x <= 1.0 and 0.0 <= normalised_y <= 1.0:
+                        center_x, center_y = normalised_x, normalised_y
+
+        x1 = clamp(x, 0.0, 1.0)
+        y1 = clamp(y, 0.0, 1.0)
+        x2 = clamp(x + width, 0.0, 1.0)
+        y2 = clamp(y + height, 0.0, 1.0)
+        if x2 <= x1 or y2 <= y1:
+            continue
+
         result.append(Detection(
             label=str(item.get("name", item.get("label", item.get("class", "")))),
             confidence=confidence,
-            x=clamp(x, 0.0, 1.0),
-            y=clamp(y, 0.0, 1.0),
-            w=clamp(width, 0.0, 1.0),
-            h=clamp(height, 0.0, 1.0),
+            x=x1,
+            y=y1,
+            w=x2 - x1,
+            h=y2 - y1,
+            center_x=center_x,
+            center_y=center_y,
         ))
     return result
 
@@ -128,24 +187,35 @@ class PID:
         integral_limit=1.0,
         derivative_filter=0.2,
     ):
-        if output_limit <= 0:
+        try:
+            self.kp = float(kp)
+            self.ki = float(ki)
+            self.kd = float(kd)
+            self.output_limit = float(output_limit)
+            self.integral_limit = float(integral_limit)
+            self.derivative_filter = float(derivative_filter)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("PID parameters must be finite numbers") from exc
+        if not all(math.isfinite(value) for value in (
+            self.kp,
+            self.ki,
+            self.kd,
+            self.output_limit,
+            self.integral_limit,
+            self.derivative_filter,
+        )):
+            raise ValueError("PID parameters must be finite numbers")
+        if self.output_limit <= 0:
             raise ValueError("output_limit must be positive")
-        if integral_limit < 0:
+        if self.integral_limit < 0:
             raise ValueError("integral_limit cannot be negative")
-        if not 0.0 <= derivative_filter <= 1.0:
+        if not 0.0 <= self.derivative_filter <= 1.0:
             raise ValueError("derivative_filter must be between 0 and 1")
-
-        self.kp = float(kp)
-        self.ki = float(ki)
-        self.kd = float(kd)
-        self.output_limit = float(output_limit)
-        self.integral_limit = float(integral_limit)
-        self.derivative_filter = float(derivative_filter)
         self.prev_error = None
         self.integral = 0.0
         self.derivative = 0.0
 
-    def update(self, error, dt):
+    def update(self, error, dt, integrate=True):
         dt = max(float(dt), 1e-6)
         error = float(error)
 
@@ -156,11 +226,13 @@ class PID:
         alpha = self.derivative_filter
         self.derivative = alpha * raw_derivative + (1.0 - alpha) * self.derivative
 
-        candidate_integral = clamp(
-            self.integral + error * dt,
-            -self.integral_limit,
-            self.integral_limit,
-        )
+        candidate_integral = self.integral
+        if integrate:
+            candidate_integral = clamp(
+                self.integral + error * dt,
+                -self.integral_limit,
+                self.integral_limit,
+            )
         candidate_output = (
             self.kp * error
             + self.ki * candidate_integral
@@ -170,7 +242,7 @@ class PID:
         # Conditional integration prevents further wind-up while saturated.
         saturated_high = candidate_output > self.output_limit and error > 0
         saturated_low = candidate_output < -self.output_limit and error < 0
-        if not (saturated_high or saturated_low):
+        if integrate and not (saturated_high or saturated_low):
             self.integral = candidate_integral
 
         output = (
@@ -188,15 +260,15 @@ class PID:
 
 
 DEFAULT_AXIS_CONFIG = {
-    "kp": 70.0,
-    "ki": 2.0,
-    "kd": 3.0,
-    "output_limit": 90.0,
+    "kp": 60.0,
+    "ki": 0.0,
+    "kd": 2.0,
+    "output_limit": 60.0,
     "integral_limit": 0.25,
     "derivative_filter": 0.2,
     "deadband": 0.03,
-    "min_angle": 10.0,
-    "max_angle": 170.0,
+    "min_angle": 20.0,
+    "max_angle": 160.0,
     "center_angle": 90.0,
     "direction": 1.0,
 }
@@ -212,13 +284,22 @@ class GimbalController:
         tilt_config=None,
         dt_min=0.005,
         dt_max=0.2,
+        pan_channel=1,
+        tilt_channel=2,
     ):
         self.servo = servo
+        self.pan_channel = pan_channel
+        self.tilt_channel = tilt_channel
         self.pan_config = self._axis_config(pan_config)
         self.tilt_config = self._axis_config(tilt_config)
         self.dt_min = float(dt_min)
         self.dt_max = float(dt_max)
-        if self.dt_min <= 0 or self.dt_max < self.dt_min:
+        if (
+            not math.isfinite(self.dt_min)
+            or not math.isfinite(self.dt_max)
+            or self.dt_min <= 0
+            or self.dt_max < self.dt_min
+        ):
             raise ValueError("expected 0 < dt_min <= dt_max")
 
         self.pan = self._pid(self.pan_config)
@@ -232,6 +313,8 @@ class GimbalController:
         merged.update(config or {})
         for key in merged:
             merged[key] = float(merged[key])
+        if not all(math.isfinite(value) for value in merged.values()):
+            raise ValueError("servo PID configuration must contain finite numbers")
         if merged["min_angle"] >= merged["max_angle"]:
             raise ValueError("servo min_angle must be less than max_angle")
         if not merged["min_angle"] <= merged["center_angle"] <= merged["max_angle"]:
@@ -264,7 +347,23 @@ class GimbalController:
         if error == 0.0:
             pid.reset()
             return angle
-        velocity = pid.update(error, dt) * config["direction"]
+
+        direction = config["direction"]
+        signed_error = error * direction
+        pushing_lower_limit = (
+            angle <= config["min_angle"] and signed_error < 0.0
+        )
+        pushing_upper_limit = (
+            angle >= config["max_angle"] and signed_error > 0.0
+        )
+        at_outward_limit = pushing_lower_limit or pushing_upper_limit
+        if at_outward_limit:
+            # The image loop cannot reduce an error by pushing farther through
+            # a mechanical stop.  Clear I and keep it frozen until error reverses.
+            pid.integral = 0.0
+        velocity = pid.update(
+            error, dt, integrate=not at_outward_limit
+        ) * direction
         return clamp(
             angle + velocity * dt,
             config["min_angle"],
@@ -281,13 +380,36 @@ class GimbalController:
             cy - 0.5, dt, self.tilt, self.tilt_angle, self.tilt_config
         )
         if self.servo:
-            self.servo.set_angle("pan", self.pan_angle)
-            self.servo.set_angle("tilt", self.tilt_angle)
+            if hasattr(self.servo, "set_angles"):
+                self.servo.set_angles({
+                    self.pan_channel: self.pan_angle,
+                    self.tilt_channel: self.tilt_angle,
+                })
+            else:
+                self.servo.set_angle(self.pan_channel, self.pan_angle)
+                self.servo.set_angle(self.tilt_channel, self.tilt_angle)
         return round(self.pan_angle, 1), round(self.tilt_angle, 1)
 
     def hold(self):
         self.pan.reset()
         self.tilt.reset()
+        return round(self.pan_angle, 1), round(self.tilt_angle, 1)
+
+    def recenter(self):
+        """Command both axes to their calibrated centre and keep PWM active."""
+        self.pan.reset()
+        self.tilt.reset()
+        self.pan_angle = self.pan_config["center_angle"]
+        self.tilt_angle = self.tilt_config["center_angle"]
+        if self.servo:
+            if hasattr(self.servo, "set_angles"):
+                self.servo.set_angles({
+                    self.pan_channel: self.pan_angle,
+                    self.tilt_channel: self.tilt_angle,
+                })
+            else:
+                self.servo.set_angle(self.pan_channel, self.pan_angle)
+                self.servo.set_angle(self.tilt_channel, self.tilt_angle)
         return round(self.pan_angle, 1), round(self.tilt_angle, 1)
 
 
@@ -306,6 +428,13 @@ class ControlPolicy:
         self.empty_frames_to_idle = int(empty_frames_to_idle)
         self.confidence_threshold = float(confidence_threshold)
         self.target_labels = target_labels
+        self.smoothed_roi = None
+
+    def reset(self):
+        """Forget the current target after a detector-stream timeout."""
+        self.mode = "idle"
+        self.last_switch = 0.0
+        self.empty_streak = 0
         self.smoothed_roi = None
 
     def _smooth(self, roi):
@@ -336,7 +465,7 @@ class ControlPolicy:
             self.mode = "tracking"
             self.last_switch = now
         elif not strong and self.mode == "tracking":
-            if self.empty_streak >= self.empty_frames_to_idle and can_switch:
+            if self.empty_streak >= self.empty_frames_to_idle:
                 self.mode = "idle"
                 self.last_switch = now
                 self.smoothed_roi = None
