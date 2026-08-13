@@ -52,6 +52,7 @@ fi
 start_service vision "$PYTHON" -m vision_service.main
 start_service voice "$PYTHON" -m voice_service.main
 start_service gpio "$PYTHON" -m gpio_service.main
+start_service control "$PYTHON" -m control_service.main
 start_service session "$PYTHON" -m session_manager.main
 start_service llm "$PYTHON" -m llm_orchestrator.main
 start_service dashboard "$PYTHON" -m dashboard_service.main
