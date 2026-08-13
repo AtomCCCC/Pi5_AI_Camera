@@ -63,7 +63,7 @@ PAGE = """<!doctype html>
       <div id="detections" class="items"><span class="muted">Waiting for detector data</span></div>
       <h2 style="margin-top:24px">VLM scenario analysis</h2>
       <pre id="vlm" class="muted">No VLM response yet</pre>
-      <h2>LLM 响应</h2>
+      <h2>LLM Response</h2>
       <pre id="llm" class="muted">No LLM response yet</pre>
     </aside>
   </div>
