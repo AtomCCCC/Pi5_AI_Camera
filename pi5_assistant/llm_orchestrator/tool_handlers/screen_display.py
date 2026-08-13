@@ -9,14 +9,19 @@ import json
 class ScreenDisplayHandler:
     """Sends display commands to the GPIO Service."""
 
-    def __init__(self, mqtt):
+    def __init__(self, mqtt, command_topic="gpio/command"):
         self.mqtt = mqtt
+        self.command_topic = command_topic
 
     def handle(self, arguments: dict, session_id: str) -> str:
-        content = arguments["content"]
+        content = arguments.get("content")
+        if not isinstance(content, str):
+            return json.dumps({"error": "content must be text"})
         clear = arguments.get("clear", True)
+        if not isinstance(clear, bool):
+            return json.dumps({"error": "clear must be true or false"})
 
-        self.mqtt.publish("gpio/command", {
+        self.mqtt.publish(self.command_topic, {
             "type": "screen",
             "content": content,
             "clear": clear,

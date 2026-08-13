@@ -25,7 +25,7 @@ Pi sudo: userpi/1
 - ✅ OllamaClient updated — routes through NPU proxy, auto-fallback to CPU
 - ✅ Router updated — DeepSeek / Hailo NPU / Ollama proxy triage
 - ✅ GPIO service rewritten for Pi 5 (kernel PWM via /sys/class/pwm/pwmchip0, no pigpio)
-- ✅ Servos tested — GPIO18 (pwm2, Pin12), GPIO12 (pwm0, Pin32) with hardware PWM
+- ✅ Servo mapping — GPIO13 (pwm1, Pin33), GPIO12 (pwm0, Pin32) with hardware PWM
 - ✅ Tool definitions fixed — added "type":"function" + "function":{} wrapper
 - ✅ README.md updated — added Section 13 Quick Start / Setup Guide
 - ✅ All changes committed and pushed to GitHub (main branch)
@@ -34,7 +34,7 @@ Pi sudo: userpi/1
 - 2 LLM backends: DeepSeek (online), OllamaClient → NPU proxy :8000 (offline)
   - NPU proxy routes plain chat → Hailo-10H NPU (0% CPU), tool calls → CPU Ollama fallback
 - GPIO: kernel PWM sysfs (no pigpio on Debian 13 Pi 5)
-- Servos: GPIO18=servo1, GPIO12=servo2, hardware PWM via pwmchip0
+- Servos: GPIO13=servo1, GPIO12=servo2, RP1 hardware PWM via configured pwmchipN
 - NPU Proxy: port 8000, wraps hailo_platform.genai.LLM as Ollama-compatible API
 - MQTT: Mosquitto on localhost:1883, 5 services
 

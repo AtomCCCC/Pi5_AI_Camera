@@ -2,7 +2,10 @@
 
 import os
 import json
+import logging
 import paho.mqtt.client as mqtt
+
+logger = logging.getLogger(__name__)
 
 
 class MQTTClient:
@@ -19,8 +22,17 @@ class MQTTClient:
 
     def subscribe(self, topic: str, callback):
         def _on_message(_client, _userdata, msg):
-            payload = json.loads(msg.payload.decode())
-            callback(payload)
+            try:
+                payload = json.loads(msg.payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                logger.warning("Ignoring invalid JSON on MQTT topic %s", msg.topic)
+                return
+
+            try:
+                callback(payload)
+            except Exception:
+                # An application callback must not kill Paho's network thread.
+                logger.exception("MQTT callback failed for topic %s", msg.topic)
 
         self.client.subscribe(topic)
         self.client.message_callback_add(topic, _on_message)

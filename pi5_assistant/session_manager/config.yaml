@@ -7,7 +7,9 @@ mqtt:
   topic_session_create: "session/create"
   topic_session_end: "session/end"
   topic_interrupt: "interrupt"
+  topic_voice_transcript: "voice/transcript"
   topic_command_out: "command/in"     # forwards user text to LLM orchestrator
+  topic_response_in: "response/out"   # records LLM replies in the session history
 
 session:
   timeout: 30           # seconds without activity before auto-end

@@ -23,6 +23,6 @@ tts:
 mqtt:
   broker: "localhost"
   port: 1883
-  topic_command_in: "command/in"
+  topic_transcript: "voice/transcript"
   topic_response_out: "response/out"
   topic_interrupt: "session/interrupt"

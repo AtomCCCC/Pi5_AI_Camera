@@ -1,7 +1,7 @@
 """Voice Service — main entry point.
 
-Wakes on wake word, captures audio, transcribes via STT, publishes
-to command/in, subscribes to response/out for TTS playback.
+Wakes on wake word, captures audio, transcribes via STT, and publishes
+to the Session Manager. Subscribes to response/out for TTS playback.
 Handles voice interrupt (new wake word during TTS stops playback).
 """
 
@@ -45,7 +45,9 @@ class VoiceService:
             volume=cfg["tts"]["volume"],
         )
 
-        self.topic_command_in = cfg["mqtt"]["topic_command_in"]
+        self.topic_transcript = cfg["mqtt"].get(
+            "topic_transcript", "voice/transcript"
+        )
         self.topic_response_out = cfg["mqtt"]["topic_response_out"]
         self.topic_interrupt = cfg["mqtt"]["topic_interrupt"]
 
@@ -84,8 +86,9 @@ class VoiceService:
         session_id = str(uuid.uuid4())
         print(f"[Voice] [{session_id}] → {text}")
 
-        # Publish command
-        self.mqtt.publish(self.topic_command_in, {
+        # The Session Manager assigns/persists the active conversation before
+        # forwarding the command to the LLM Orchestrator.
+        self.mqtt.publish(self.topic_transcript, {
             "text": text,
             "session_id": session_id,
         })

@@ -17,6 +17,14 @@ router:
   connectivity_check_interval: 30   # seconds
   prefer_online: true               # Use DeepSeek when internet available
 
+orchestrator:
+  max_tool_rounds: 4                # Bound repeated model tool calls per command.
+
+hardware:
+  # Only these BCM pins may be controlled by the gpio_write LLM tool.
+  # Servo PWM pins are intentionally excluded.
+  allowed_gpio_pins: [17, 22, 23, 24, 25, 27]
+
 system_prompt: |
   You are a Raspberry Pi 5 AI assistant connected to a camera,
   2 servo motors, and a display. You can detect objects in real time,

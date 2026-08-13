@@ -9,25 +9,25 @@ camera:
   flip_vertical: false
 
   # Dynamic FPS/resolution adjustment
-  # Camera Module 3 supports multi-resolution streaming.
-  # YOLO on Hailo-10H handles up to 430+ FPS @ 640×640,
-  # so we adjust camera capture resolution & framerate by motion:
-  #   High motion → 640×320 @ 60fps (wider FOV, faster capture)
-  #   Low motion  → 640×640 @ 30fps (full quality, stable)
+  # Camera Module 3 native modes are used to trade resolution vs framerate.
+  # The KAN outputs a continuous alpha; a hysteresis band (0.4-0.6) selects
+  # the profile to avoid flapping near the boundary:
+  #   High motion → 1536×864  @ 120fps (FPS-priority, fast capture)
+  #   Low motion  → 2304×1296 @ 56fps  (RES-priority, full detail)
   dynamic_adjust:
     enabled: true
-    check_interval: 0.5        # seconds between motion checks
-    motion_threshold: 30       # mean pixel diff to trigger "high motion"
+    check_interval: 0.5        # seconds between KAN decisions
+    motion_threshold: 30       # fallback if KAN is unavailable
     motion_window: 5           # frames to average for smoothing
     profiles:
       low_motion:
-        resolution: [640, 640]
-        framerate: 30
-        label: "full quality"
+        resolution: [2304, 1296]
+        framerate: 56
+        label: "RES-priority"
       high_motion:
-        resolution: [640, 320]
-        framerate: 60
-        label: "fast capture"
+        resolution: [1536, 864]
+        framerate: 120
+        label: "FPS-priority"
 
 detection:
   backend: "hailo"            # "hailo" | "ncnn" | "opencv"
@@ -44,8 +44,18 @@ detection:
 roi:
   enabled: true
   max_regions: 1             # Increase for multiple simultaneous ROI images
-  padding_ratio: 0.08         # Extra border around each detection
-  max_dimension: 320          # Downscale crops to control MQTT payload size
+  # Keep this selection aligned with control_service/config.yaml. The bundled
+  # four-class HEF reports a human as "person"; a dedicated
+  # face-detection HEF normally reports "face". Both are accepted.
+  target_labels: ["person", "face"]
+  minimum_confidence: 0.65
+  target_lock_max_distance: 0.25  # Normalised centre distance per frame.
+  target_reacquire_frames: 3      # Hold briefly before switching to another face.
+  # One quarter of the 640x640 frame area: a fixed 320x320 crop centred on the
+  # detected target. Near an edge the crop shifts inward but stays 320x320.
+  fixed_size: [320, 320]
+  padding_ratio: 0.08         # Used only when fixed_size is removed/disabled
+  max_dimension: 320          # Encoded ROI remains at most 320x320
   jpeg_quality: 80
   publish_interval: 0.2       # seconds (5 ROI updates per second)
 
@@ -73,4 +83,3 @@ mqtt:
   topic_roi: "vision/roi"
   topic_fps_status: "vision/fps/status"
   frame_publish_interval: 0.2
-  

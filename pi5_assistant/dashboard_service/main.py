@@ -34,7 +34,7 @@ PAGE = """<!doctype html>
     #frame{display:block;width:100%;min-height:360px;max-height:68vh;background:#05080c;border-radius:8px;object-fit:contain}
     .roi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
     .roi-card{margin:0;background:#111821;border:1px solid var(--line);border-radius:9px;padding:9px}
-    .roi-card img{display:block;width:100%;height:190px;background:#05080c;border-radius:6px;object-fit:contain}
+    .roi-card img{display:block;width:320px;height:320px;max-width:100%;aspect-ratio:1/1;margin:auto;background:#05080c;border-radius:6px;object-fit:contain}
     .roi-card figcaption{margin-top:8px;font-size:.86rem;line-height:1.35;color:var(--muted)}
     .empty{display:grid;place-items:center;min-height:150px;border:1px dashed #34465b;border-radius:8px;color:var(--muted)}
     .muted,.time{color:var(--muted)}.time{font-size:.8rem;margin:9px 0 0}
@@ -46,25 +46,25 @@ PAGE = """<!doctype html>
 <body>
 <main>
   <h1>Pi 5 AI Camera</h1>
-  <div class="sub"><span class="status">●</span> MQTT 实时看板 · <span id="updated">等待摄像头数据…</span></div>
+  <div class="sub"><span class="status">●</span> MQTT Real-time Dashboard · <span id="updated">Waiting for camera data…</span></div>
   <div class="layout">
     <div class="visuals">
       <section class="card">
-        <div class="card-head"><h2>摄像头画面</h2><span class="time" id="frameTime">尚未收到画面</span></div>
-        <img id="frame" alt="实时摄像头画面">
+        <div class="card-head"><h2>Camera image</h2><span class="time" id="frameTime">Haven't received the screen yet</span></div>
+        <img id="frame" alt="Real time camera image">
       </section>
       <section class="card">
-        <div class="card-head"><h2>实时 ROI</h2><span class="time" id="roiSummary">等待 ROI 数据</span></div>
-        <div id="roiGrid" class="roi-grid"><div class="empty">检测到目标后显示 ROI</div></div>
+        <div class="card-head"><h2>Real time ROI</h2><span class="time" id="roiSummary">Waiting for ROI Data</span></div>
+        <div id="roiGrid" class="roi-grid"><div class="empty">Display ROI after detecting the target</div></div>
       </section>
     </div>
     <aside class="card">
-      <h2>检测目标</h2>
-      <div id="detections" class="items"><span class="muted">等待检测器数据…</span></div>
-      <h2 style="margin-top:24px">VLM 场景分析</h2>
-      <pre id="vlm" class="muted">尚无 VLM 响应</pre>
+      <h2>detection target</h2>
+      <div id="detections" class="items"><span class="muted">Waiting for detector data</span></div>
+      <h2 style="margin-top:24px">VLM scenario analysis</h2>
+      <pre id="vlm" class="muted">No VLM response yet</pre>
       <h2>LLM 响应</h2>
-      <pre id="llm" class="muted">尚无 LLM 响应</pre>
+      <pre id="llm" class="muted">No LLM response yet</pre>
     </aside>
   </div>
 </main>
@@ -81,7 +81,7 @@ PAGE = """<!doctype html>
     if (!detections.length) {
       const empty = document.createElement('span');
       empty.className = 'muted';
-      empty.textContent = '当前未检测到目标';
+      empty.textContent = 'Currently no target detected';
       root.appendChild(empty);
       return;
     }
@@ -98,11 +98,11 @@ PAGE = """<!doctype html>
     const root = document.getElementById('roiGrid');
     root.replaceChildren();
     document.getElementById('roiSummary').textContent =
-      rois.length ? `${rois.length} 个目标 · ${new Date(timestamp * 1000).toLocaleTimeString()}` : '当前无目标';
+      rois.length ? `${rois.length} targets · ${new Date(timestamp * 1000).toLocaleTimeString()}` : 'There is currently no target';
     if (!rois.length) {
       const empty = document.createElement('div');
       empty.className = 'empty';
-      empty.textContent = '当前帧没有可显示的 ROI';
+      empty.textContent = 'There is no ROI to display in the current frame';
       root.appendChild(empty);
       return;
     }
@@ -110,12 +110,15 @@ PAGE = """<!doctype html>
       const figure = document.createElement('figure');
       figure.className = 'roi-card';
       const image = document.createElement('img');
-      image.alt = `${roi.name || '目标'} ROI`;
+      image.alt = `${roi.name || 'Target'} ROI`;
       image.src = `/roi/${encodeURIComponent(instanceId)}/${generation}/${imageIndex}.jpg`;
       const caption = document.createElement('figcaption');
       const confidence = Math.round(Number(roi.confidence || 0) * 100);
       const crop = Array.isArray(roi.crop_bbox) ? roi.crop_bbox : [];
-      const size = crop.length === 4 ? ` · 裁剪 ${crop[2]}×${crop[3]}` : '';
+      const roiSize = roi.roi_size || {};
+      const width = Number(roiSize.width || (crop.length === 4 ? crop[2] : 0));
+      const height = Number(roiSize.height || (crop.length === 4 ? crop[3] : 0));
+      const size = width && height ? ` · Fixed ROI ${width}×${height}` : '';
       caption.textContent = `${roi.name || 'unknown'} ${confidence}%${size}`;
       figure.append(image, caption);
       root.appendChild(figure);
@@ -130,11 +133,11 @@ PAGE = """<!doctype html>
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const state = await response.json();
       document.getElementById('updated').textContent = state.updated_at
-        ? `更新于 ${new Date(state.updated_at * 1000).toLocaleTimeString()}`
-        : '等待摄像头数据…';
+        ? `Update on ${new Date(state.updated_at * 1000).toLocaleTimeString()}`
+        : 'Waiting for camera data';
       renderDetections(Array.isArray(state.detections) ? state.detections : []);
-      document.getElementById('vlm').textContent = state.vlm || '尚无 VLM 响应';
-      document.getElementById('llm').textContent = state.llm || '尚无 LLM 响应';
+      document.getElementById('vlm').textContent = state.vlm || 'No VLM response yet';
+      document.getElementById('llm').textContent = state.llm || 'No VLM response yet';
 
       if (state.roi_instance_id && state.roi_instance_id !== roiInstanceId) {
         roiInstanceId = state.roi_instance_id;
@@ -158,7 +161,7 @@ PAGE = """<!doctype html>
         );
       }
     } catch (_error) {
-      document.getElementById('updated').textContent = '看板正在重新连接…';
+      document.getElementById('updated').textContent = 'The dashboard is reconnecting…';
     } finally {
       refreshInFlight = false;
     }

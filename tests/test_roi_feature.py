@@ -109,6 +109,7 @@ def pipeline_config():
         "roi": {
             "enabled": True,
             "max_regions": 2,
+            "fixed_size": [80, 80],
             "padding_ratio": 0.1,
             "max_dimension": 80,
             "jpeg_quality": 80,
@@ -148,7 +149,7 @@ class DetectionPipelineROITests(unittest.TestCase):
         self.assertEqual(detections[0]["class"], 1)
         self.assertEqual(detections[0]["name"], "bicycle")
 
-    def test_roi_payload_is_ranked_padded_resized_and_base64_encoded(self):
+    def test_roi_payload_is_ranked_fixed_size_and_base64_encoded(self):
         frame = np.zeros((100, 200, 3), dtype=np.uint8)
         detections = [
             {
@@ -171,18 +172,105 @@ class DetectionPipelineROITests(unittest.TestCase):
         self.assertEqual(topic, "vision/roi")
         self.assertEqual(payload["timestamp"], 123.5)
         self.assertEqual(payload["frame_size"], {"width": 200, "height": 100})
+        self.assertEqual(payload["frame_center"], [100.0, 50.0])
+        self.assertEqual(payload["coordinate_space"], "pixels")
         json.dumps(payload)
         self.assertEqual([roi["name"] for roi in payload["rois"]], ["person", "car"])
 
         first = payload["rois"][0]
-        self.assertEqual(first["crop_bbox"], [42, 14, 96, 72])
-        self.assertEqual(first["image_size"], {"width": 80, "height": 60})
+        self.assertEqual(first["roi_center"], [90.0, 50.0])
+        self.assertEqual(first["crop_bbox"], [50, 10, 80, 80])
+        self.assertEqual(first["roi_size"], {"width": 80, "height": 80})
+        self.assertTrue(first["fixed_size"])
+        self.assertEqual(first["image_size"], {"width": 80, "height": 80})
         self.assertTrue(
             base64.b64decode(first["image_b64"]).startswith(b"\xff\xd8")
         )
 
         second = payload["rois"][1]
-        self.assertEqual(second["crop_bbox"], [187, 88, 13, 12])
+        # The control point remains the original detection centre even though
+        # the fixed display crop is shifted inward at the frame edge.
+        self.assertEqual(second["roi_center"], [205.0, 100.0])
+        self.assertEqual(second["crop_bbox"], [120, 20, 80, 80])
+
+    def test_roi_center_is_320_320_in_complete_640_frame(self):
+        frame = np.zeros((640, 640, 3), dtype=np.uint8)
+        self.pipeline.roi_fixed_size = (320, 320)
+        self.pipeline.roi_max_dimension = 320
+        detection = {
+            "class": 0,
+            "name": "person",
+            "confidence": 0.95,
+            "bbox": [270, 280, 100, 80],
+        }
+
+        self.pipeline._publish_roi_images(frame, [detection], 123.75)
+
+        _topic, payload = self.mqtt.messages[-1]
+        self.assertEqual(payload["frame_center"], [320.0, 320.0])
+        self.assertEqual(payload["rois"][0]["roi_center"], [320.0, 320.0])
+        self.assertEqual(payload["rois"][0]["crop_bbox"], [160, 160, 320, 320])
+        self.assertEqual(
+            payload["rois"][0]["roi_size"], {"width": 320, "height": 320}
+        )
+        self.assertEqual(
+            payload["rois"][0]["image_size"], {"width": 320, "height": 320}
+        )
+
+    def test_fixed_320_roi_shifts_at_edge_without_changing_size(self):
+        frame = np.zeros((640, 640, 3), dtype=np.uint8)
+        self.pipeline.roi_fixed_size = (320, 320)
+        self.pipeline.roi_max_dimension = 320
+        detection = {
+            "class": 0,
+            "name": "person",
+            "confidence": 0.95,
+            "bbox": [600, 600, 30, 30],
+        }
+
+        self.pipeline._publish_roi_images(frame, [detection], 123.8)
+
+        _topic, payload = self.mqtt.messages[-1]
+        roi = payload["rois"][0]
+        self.assertEqual(roi["roi_center"], [615.0, 615.0])
+        self.assertEqual(roi["crop_bbox"], [320, 320, 320, 320])
+        self.assertEqual(roi["image_size"], {"width": 320, "height": 320})
+
+    def test_fixed_roi_rejects_detection_completely_outside_frame(self):
+        frame = np.zeros((640, 640, 3), dtype=np.uint8)
+        self.pipeline.roi_fixed_size = (320, 320)
+        detection = {
+            "class": 0,
+            "name": "person",
+            "confidence": 0.95,
+            "bbox": [700, 700, 20, 20],
+        }
+
+        self.pipeline._publish_roi_images(frame, [detection], 123.9)
+
+        _topic, payload = self.mqtt.messages[-1]
+        self.assertEqual(payload["rois"], [])
+
+    def test_fixed_roi_never_shrinks_for_an_undersized_frame(self):
+        frame = np.zeros((60, 60, 3), dtype=np.uint8)
+        detection = {
+            "class": 0,
+            "name": "person",
+            "confidence": 0.95,
+            "bbox": [10, 10, 30, 30],
+        }
+
+        self.pipeline._publish_roi_images(frame, [detection], 124.0)
+
+        _topic, payload = self.mqtt.messages[-1]
+        self.assertEqual(payload["rois"], [])
+
+    def test_fixed_roi_rejects_a_smaller_jpeg_limit(self):
+        config = pipeline_config()
+        config["roi"]["max_dimension"] = 79
+
+        with self.assertRaisesRegex(ValueError, "largest fixed_size dimension"):
+            DetectionPipeline(config, FakeBuffer(), self.mqtt)
 
     def test_empty_detection_update_clears_remote_rois(self):
         frame = np.zeros((100, 200, 3), dtype=np.uint8)
@@ -192,6 +280,74 @@ class DetectionPipelineROITests(unittest.TestCase):
         topic, payload = self.mqtt.messages[-1]
         self.assertEqual(topic, "vision/roi")
         self.assertEqual(payload["rois"], [])
+
+    def test_continuous_detection_payload_has_pid_coordinate_contract(self):
+        frame = np.zeros((100, 200, 3), dtype=np.uint8)
+        detection = {
+            "class": 0,
+            "name": "person",
+            "confidence": 0.93,
+            "bbox": [120, 20, 40, 50],
+        }
+        invalid_higher_confidence = {
+            "class": 0,
+            "name": "person",
+            "confidence": 0.99,
+            "bbox": [10, 10, -5, 20],
+        }
+        self.pipeline.estimate_motion = lambda _frame: 0
+        self.pipeline._infer = lambda _frame: [
+            invalid_higher_confidence, detection
+        ]
+        self.pipeline.frame_publish_interval = float("inf")
+
+        self.pipeline.process_frame(frame)
+
+        payloads = [
+            payload for topic, payload in self.mqtt.messages
+            if topic == "vision/detections"
+        ]
+        self.assertEqual(len(payloads), 1)
+        payload = payloads[0]
+        self.assertEqual(payload["frame_size"], {"width": 200, "height": 100})
+        self.assertEqual(payload["coordinate_space"], "pixels")
+        self.assertEqual(payload["frame_center"], [100.0, 50.0])
+        self.assertEqual(
+            payload["tracking_target"]["roi_center"], [140.0, 45.0]
+        )
+        target_without_center = dict(payload["tracking_target"])
+        target_without_center.pop("roi_center")
+        self.assertEqual(target_without_center, detection)
+        self.assertEqual(payload["sequence"], 1)
+
+    def test_target_lock_does_not_jump_when_confidence_order_changes(self):
+        left = {
+            "name": "person", "confidence": 0.90,
+            "bbox": [20, 20, 30, 40],
+        }
+        right = {
+            "name": "person", "confidence": 0.80,
+            "bbox": [150, 20, 30, 40],
+        }
+        self.assertIs(
+            self.pipeline._select_tracking_target([left, right], 200, 100),
+            left,
+        )
+
+        left_next = {
+            "name": "person", "confidence": 0.70,
+            "bbox": [24, 21, 30, 40],
+        }
+        right_higher_confidence = {
+            "name": "person", "confidence": 0.99,
+            "bbox": [148, 20, 30, 40],
+        }
+        self.assertIs(
+            self.pipeline._select_tracking_target(
+                [right_higher_confidence, left_next], 200, 100
+            ),
+            left_next,
+        )
 
     def test_published_payload_is_consumed_by_dashboard_state(self):
         frame = np.zeros((100, 200, 3), dtype=np.uint8)

@@ -1,0 +1,60 @@
+# Closed-loop visual tracking for the two-axis FS90 camera mount.
+
+mqtt:
+  broker: "localhost"
+  port: 1883
+  # Continuous detector output. vision/detect_result is only an on-demand LLM reply.
+  topic_detections:    "vision/detections"
+  topic_command:       "control/command"
+  topic_gpio_command:  "gpio/command"
+  topic_status:        "control/status"
+  topic_power_mode:    "control/power_mode"
+
+control:
+  confidence_threshold: 0.65
+  # Keep aligned with vision_service/config.yaml roi.target_labels.
+  target_labels: ["person", "face"]
+  min_switch_interval: 0.15
+  # The visible ROI disappearing is an immediate request to return to centre.
+  empty_frames_to_idle: 1
+  frame_width: 640           # Fallback only; Vision normally sends frame_size.
+  frame_height: 640
+  dt_min: 0.005
+  dt_max: 0.20               # Prevent a pause from causing one large movement.
+  command_interval: 0.04     # At most 25 paired gimbal updates per second.
+  detection_timeout: 0.75    # Reset PID if the Vision stream stops.
+  max_detection_age: 0.50    # Ignore delayed/stale MQTT feedback.
+  max_manual_override: 30.0  # Clamp externally requested pause durations.
+
+servo:
+  # These are logical MQTT servo numbers, not sysfs PWM channel numbers.
+  pan_channel: 1             # logical servo1 -> GPIO13 / pwm1
+  tilt_channel: 2            # logical servo2 -> GPIO12 / pwm0
+
+  # PID output is angular velocity in degrees/second. Start with Ki at zero
+  # during physical tuning, then add only enough Ki to remove steady offset.
+  pan:
+    kp: 60.0
+    ki: 0.0
+    kd: 2.0
+    output_limit: 60.0
+    integral_limit: 0.25
+    derivative_filter: 0.20
+    deadband: 0.03
+    min_angle: 20
+    max_angle: 160
+    center_angle: 90
+    direction: 1             # Change to -1 if pan moves away from the target.
+
+  tilt:
+    kp: 60.0
+    ki: 0.0
+    kd: 2.0
+    output_limit: 60.0
+    integral_limit: 0.25
+    derivative_filter: 0.20
+    deadband: 0.03
+    min_angle: 20
+    max_angle: 160
+    center_angle: 90
+    direction: 1             # Change to -1 if tilt moves away from the target.

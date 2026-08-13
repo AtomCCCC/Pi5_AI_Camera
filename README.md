@@ -5,6 +5,19 @@
 > **Status:** Development — merged vision branch updates (continuous detection thread + YOLOv8m COCO parsing) with LLM backends and GPIO pipeline validated on hardware  
 > **Hardware:** Pi 5 (8GB) + AI HAT+ 2 (Hailo-10H, 40 TOPS) + Camera Module 3
 
+### Visual PID update (2026-08-12)
+
+- Added a two-axis visual PID service that keeps the selected ROI centre at
+  the full-frame centre and drives position-type FS90 pan/tilt servos.
+- `vision/detections` now includes the exact ROI target, source frame size, and
+  full-frame pixel centre (`roi_center`). The 640x640 PID setpoint is
+  `(320, 320)`; `run_all.sh` starts the control service automatically.
+- Added deadband, derivative filtering, anti-windup, command/angle limits,
+  stale-feedback rejection, a detector-stream watchdog, and paired commands.
+- FS90 PWM pulse and mechanical limits are enforced again in the GPIO layer.
+- If the ROI disappears or the detector stream times out, both axes receive
+  one paired centre-angle command and remain powered to hold that position.
+
 ### Latest Progress. (2026-07-10)
 
 - Merged branch `Vison_LLM_Destect` into `main`.
@@ -520,6 +533,21 @@ Current behavior in code:
 
 ---
 
+### Visual PID Control Service
+
+`control_service` subscribes to the lightweight, per-frame
+`vision/detections` feed. It normalises the selected ROI centre by the actual
+source width and height, runs independent pan and tilt PID loops, and publishes
+one ordered `{type: "gimbal", angles: ...}` command. The output is angular
+velocity integrated using measured frame time, with deadband, filtered D,
+anti-windup, rate/angle limits, stale-message rejection, and a stream watchdog.
+Manual servo commands temporarily take ownership and reseed the corresponding
+PID axis before automatic tracking resumes.
+
+The control loop uses the original detection bounding-box centre rather than
+the padded/cropped JPEG centre. This avoids both the 5 Hz ROI-image transport
+delay and edge-clipping bias.
+
 ### 5.4 GPIO Service
 
 **Purpose:** Physical I/O abstraction — servo PWM control, GPIO pin writes, screen display.
@@ -533,17 +561,31 @@ gpio_service/
 └── config.yaml          # Pin assignments, servo limits, screen type
 ```
 
-**config.yaml:**
+**FS90 portion of `config.yaml`:**
 ```yaml
-servos:
+servo:
   servo1:
-    pin: 18          # BCM GPIO 18 (Pin 12) — hardware PWM pwm2
+    pin: 13          # BCM GPIO 13 (Pin 33) — hardware PWM pwm1
     freq: 50
+    min_pulse: 900
+    max_pulse: 2100
+    pulse_min_angle: 0
+    pulse_max_angle: 180
+    min_angle: 20
+    max_angle: 160
+    center_angle: 90
   servo2:
     pin: 12          # BCM GPIO 12 (Pin 32) — hardware PWM pwm0
     freq: 50
+    min_pulse: 900
+    max_pulse: 2100
+    pulse_min_angle: 0
+    pulse_max_angle: 180
+    min_angle: 20
+    max_angle: 160
+    center_angle: 90
 ```
-> **Pi 5 note:** Uses kernel PWM via `/sys/class/pwm/pwmchip0` instead of pigpio (not available on Debian 13). GPIO18→pwm2, GPIO12→pwm0.
+> **Pi 5 note:** Uses RP1 kernel PWM instead of pigpio. GPIO13→pwm1 and GPIO12→pwm0. Enable both with `dtoverlay=pwm-2chan,pin=12,func=4,pin2=13,func2=4`; verify the actual `/sys/class/pwm/pwmchipN` number after reboot.
 
 **`servo_controller.py` (Pi 5 kernel PWM):**
 
@@ -552,28 +594,17 @@ servos:
 import os, time
 
 PWM_CHIP = "/sys/class/pwm/pwmchip0"
-PERIOD_NS = 20_000_000  # 20ms → 50Hz
-GPIO_TO_PWM = {18: 2, 12: 0}  # GPIO→PWM channel
+GPIO_TO_PWM = {13: 1, 12: 0}  # GPIO→PWM channel
 
 class ServoController:
-    def __init__(self, config):
-        self._servos = {}
-        for name, cfg in config["servo"].items():
-            ch = GPIO_TO_PWM[cfg["pin"]]
-            if not os.path.exists(f"{PWM_CHIP}/pwm{ch}"):
-                with open(f"{PWM_CHIP}/export", "w") as f:
-                    f.write(str(ch))
-            with open(f"{PWM_CHIP}/pwm{ch}/period", "w") as f:
-                f.write(str(PERIOD_NS))
-            with open(f"{PWM_CHIP}/pwm{ch}/enable", "w") as f:
-                f.write("1")
-            self._servos[name] = ch
-
     def set_angle(self, servo_num, angle):
-        ch = self._servos[f"servo{servo_num}"]
-        pulse_ns = int(500_000 + (angle / 180.0) * 2_000_000)
-        with open(f"{PWM_CHIP}/pwm{ch}/duty_cycle", "w") as f:
-            f.write(str(pulse_ns))
+        # Clamp to each axis's configured mechanical range, map to its
+        # configured FS90 pulse range, then write under one controller lock.
+        ...
+
+    def set_angles(self, angles):
+        # Validate and apply both PID axes in-order under the same lock.
+        ...
 ```
 
 **`screen_driver.py` — Abstract Interface:**
@@ -1074,7 +1105,7 @@ Step  | Component               | Action
       |                         | Returns instantly: {"detections": [...]}
  13   | GPIO Service            | Receives gpio/command
       |                         | Calls ServoController.set_angle(1, 90)
-      |                         | PWM signal on GPIO 12
+      |                         | PWM signal on GPIO 13
       |                         | Publishes gpio/status: {"servo_1": 90, "status": "ok"}
  14   | LLM: Tool Dispatcher    | Receives visual_detect results:
       |                         |   [{"class": "person", "conf": 0.95}, 
@@ -1252,6 +1283,9 @@ python3 pi5_assistant/voice_service/main.py &
 # Vision Service
 python3 pi5_assistant/vision_service/main.py &
 
+# Visual PID Control Service
+python3 pi5_assistant/control_service/main.py &
+
 # LLM Orchestrator
 python3 pi5_assistant/llm_orchestrator/main.py &
 
@@ -1266,14 +1300,16 @@ python3 pi5_assistant/session_manager/main.py &
 
 | Servo | Wire Color | Pi 5 Pin | BCM GPIO | PWM Channel |
 |-------|------------|----------|----------|-------------|
-| Servo 1 | Red (VCC) | Pin 2 (5V) | — | — |
-|  | Black/Brown (GND) | Pin 6 (GND) | — | — |
-|  | Yellow/Orange (Signal) | Pin 12 | GPIO 18 | pwm2 |
-| Servo 2 | Red (VCC) | Pin 4 (5V) | — | — |
-|  | Black/Brown (GND) | Pin 39 (GND) | — | — |
+| Servo 1 | Red (VCC) | External regulated 5V | — | — |
+|  | Black/Brown (GND) | External GND + Pi GND | — | — |
+|  | Yellow/Orange (Signal) | Pin 33 | GPIO 13 | pwm1 |
+| Servo 2 | Red (VCC) | External regulated 5V | — | — |
+|  | Black/Brown (GND) | External GND + Pi GND | — | — |
 |  | Yellow/Orange (Signal) | Pin 32 | GPIO 12 | pwm0 |
 
-> **Note:** For production use, power servos from an external 5V PSU, not from Pi 5V pins.
+> **Note:** Power both servos from an external regulated 5V supply and connect
+> its ground to Pi ground. Confirm the motors are FS90, not continuous-rotation
+> FS90R units.
 
 ### 13.7 Test Each LLM Backend
 
@@ -1316,8 +1352,8 @@ with open("pi5_assistant/gpio_service/config.yaml") as f:
 from gpio_service.servo_controller import ServoController
 import time
 sc = ServoController(cfg)
-sc.set_angle(1, 0); sc.set_angle(2, 0); time.sleep(1)
-sc.set_angle(1, 180); sc.set_angle(2, 180); time.sleep(1)
+sc.set_angle(1, 80); sc.set_angle(2, 80); time.sleep(1)
+sc.set_angle(1, 100); sc.set_angle(2, 100); time.sleep(1)
 sc.set_angle(1, 90); sc.set_angle(2, 90)
 sc.cleanup()
 EOF
