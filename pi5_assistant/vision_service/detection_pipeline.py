@@ -63,6 +63,10 @@ class DetectionPipeline:
         self.kan = load_kan(str(kan_weights))
         self.last_s_id = 0.0
         self.last_alpha = 0.0
+        self.t_min = 0.01          # fastest capture period (s)
+        self.t_max = 1.00          # slowest capture period (s)
+        self.alpha_lambda = 0.8    # EMA smoothing factor
+        self.alpha_smooth = 0.0    # EMA state
         self.target_classes = [] 
         
     def set_target_classes(self, classes):
@@ -126,6 +130,19 @@ class DetectionPipeline:
         elif alpha < 0.4:
             self.current_profile = "low_motion"
         return self.current_profile
+        
+    def _capture_interval(self, alpha):
+        """Map alpha in [0,1] to a capture period by geometric interpolation.
+
+        T(a) = t_min * (t_max / t_min) ** (1 - a)
+        a -> 1 (high motion) : T -> t_min, capture faster
+        a -> 0 (static)      : T -> t_max, capture slower and save power
+        """
+        a = min(max(alpha, 0.0), 1.0)
+        self.alpha_smooth = (self.alpha_lambda * self.alpha_smooth
+                             + (1.0 - self.alpha_lambda) * a)
+        ratio = self.t_max / self.t_min
+        return self.t_min * (ratio ** (1.0 - self.alpha_smooth))
          
     def _capture_frame(self, w, h):
         """Capture a single frame via rpicam-jpeg."""
@@ -203,8 +220,8 @@ class DetectionPipeline:
                 logger.exception("Vision frame processing failed")
                 time.sleep(1)
             else:
-                # Avoid a tight retry loop if camera capture returns immediately.
-                remaining = 0.01 - (time.monotonic() - started)
+                interval = self._capture_interval(self.last_alpha)
+                remaining = interval - (time.monotonic() - started)
                 if remaining > 0:
                     time.sleep(remaining)
 
