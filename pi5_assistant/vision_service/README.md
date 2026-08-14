@@ -78,7 +78,7 @@ Continuous real-time camera pipeline running in a background thread. Provides ob
 6. **LLM Requests Detection** — When the LLM calls `visual_detect`, the handler reads the buffer instantly (no re-inference, ~1ms).
 7. **LLM Requests VLM** — When the LLM calls `vlm_query`, the handler grabs the latest frame from the buffer and runs the VLM. Path A runs on Hailo NPU (fast, zero CPU). Path B runs Qwen2.5-VL-3B on CPU (slower fallback).
 8. **Result Published** — The VLM description is published to `vision/result` for the LLM to consume as a tool response.
-9. **ROI Published** — The highest-confidence detections are clipped to the source frame, padded, resized if needed, JPEG encoded, and published together on `vision/roi`. An empty `rois` list clears stale dashboard images when a frame has no detections.
+9. **ROI Published** — The selected detection is surrounded by the configured fixed-size crop (320x320 by default), clipped by shifting the crop inward at frame edges, JPEG encoded, and published on `vision/roi`. An empty `rois` list clears the dashboard when the target disappears.
 ## Step-by-Step
 
 1. **Background Thread** — On startup, `main.py` spawns a daemon thread that continuously captures frames from Camera Module 3 (IMX708).
@@ -121,15 +121,24 @@ Both profiles are native IMX708 modes with roughly equal pixel throughput (R×F 
 | Subscribe | `vision/query` | `{prompt, session_id}` | LLM requests VLM |
 | Publish | `vision/result` | `{description, session_id}` | ← after VLM inference |
 | Publish | `vision/frame` | `{image_b64, timestamp, detections}` | Dashboard preview interval |
-| Publish | `vision/roi` | `{timestamp, frame_size, rois: [...]}` | ROI interval, including empty updates |
+| Publish | `vision/roi` | `{timestamp, frame_size, frame_center, coordinate_space, rois: [{roi_center, ...}]}` | ROI interval, including empty updates; centres use complete-frame pixels |
 
 ### ROI payload
 
 Each entry in `rois` contains the source detection `bbox` in pixel
-`[x, y, width, height]` format, the padded/clipped `crop_bbox`, class metadata,
-encoded image dimensions, MIME type, and a Base64 JPEG in `image_b64`.
-`roi.max_regions`, `padding_ratio`, `max_dimension`, `jpeg_quality`, and
-`publish_interval` are configurable in `config.yaml`.
+`[x, y, width, height]` format, its full-frame `roi_center`, the actual
+`crop_bbox`, class metadata, encoded image dimensions, MIME type, and a Base64
+JPEG in `image_b64`. By default `fixed_size: [320, 320]` keeps the crop at one
+quarter of the 640x640 frame. At an image edge the window shifts inward instead
+of shrinking. `roi.max_regions`, `fixed_size`, `padding_ratio`,
+`max_dimension`, `jpeg_quality`, and `publish_interval` are configurable in
+`config.yaml`; padding is only used when no fixed size is configured.
+
+The dashboard preview deliberately draws two different rectangles. The green
+`DET` rectangle is the detector's raw bounding box, so its width and height can
+change as the target moves. The orange `ROI 320x320` rectangle is the actual
+fixed crop. Its `x`/`y` position follows the target, while its width and height
+remain 320 pixels.
 | Publish | `vision/result` | `{description, session_id}` | after VLM inference |
 
 ## Design

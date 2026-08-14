@@ -2,6 +2,11 @@
 
 Voice-interactive AI assistant for **Raspberry Pi 5 (8GB)** with **Hailo-10H AI HAT+ 2 (40 TOPS)**.
 Features real-time object detection, local/cloud LLM reasoning, voice interrupt, and GPIO servo/screen control.
+Two independent visual PID loops keep the selected person/face ROI centred in
+the full 640x640 camera image. The control coordinate is the original bounding
+box centre `(x + width/2, y + height/2)`, with `(320, 320)` as its target. If
+the ROI disappears, both FS90 axes return to their calibrated centre angles
+and keep PWM enabled to hold position.
 
 ## Architecture
 
@@ -48,6 +53,11 @@ pi5_assistant/
 │   ├── shared_buffer.py      # Thread-safe shared frame buffer
 │   └── config.yaml
 │
+├── control_service/          # ROI-centering pan/tilt PID
+│   ├── main.py               # Detections -> paired gimbal commands
+│   ├── control_loop.py       # PID, target policy, deadband, limits
+│   └── config.yaml           # Gains, directions, angle limits
+│
 ├── llm_orchestrator/         # AI reasoning
 │   ├── main.py               # Entry point, tool loop
 │   ├── deepseek_client.py    # DeepSeek V4 Flash API (online)
@@ -65,7 +75,7 @@ pi5_assistant/
 │
 ├── gpio_service/             # Physical outputs
 │   ├── main.py               # Entry point
-│   ├── servo_controller.py   # Kernel PWM (GPIO 18→pwm2, GPIO 12→pwm0)
+│   ├── servo_controller.py   # Kernel PWM (GPIO 13→pwm1, GPIO 12→pwm0)
 │   ├── screen_driver.py       # OLED / TFT / HDMI / LCD abstraction
 │   ├── pin_config.py          # gpiozero + lgpio digital I/O
 │   └── config.yaml
@@ -96,7 +106,7 @@ pi5_assistant/
 | **Wake Word** | OpenWakeWord |
 | **STT** | faster-whisper / Vosk |
 | **TTS** | Piper TTS |
-| **Servo PWM** | Kernel PWM via `/sys/class/pwm/pwmchip0` (GPIO18/GPIO12) |
+| **Servo PWM** | Kernel PWM channels 1/0 (GPIO13/GPIO12) |
 | **Screen** | SSD1306 OLED (I2C) / TFT / HDMI (TBD) |
 
 ## Quick Start
@@ -125,6 +135,7 @@ sudo systemctl start hailo-ollama-proxy  # NPU proxy on :8000
 cd pi5_assistant
 python -m voice_service.main             # Voice I/O
 python -m vision_service.main            # Camera + YOLO + VLM
+python -m control_service.main           # ROI-centering pan/tilt PID
 python -m llm_orchestrator.main          # AI reasoning
 python -m gpio_service.main              # Servos + screen
 python -m session_manager.main           # Session lifecycle
@@ -151,10 +162,17 @@ terminal to stop all services started by the script. Logs are written to
 
 ROI behavior is configured in `vision_service/config.yaml`. `max_regions`
 selects how many confidence-ranked detections are sent per update (set it to
-`1` for a single ROI), `padding_ratio` adds context around each box, and
-`max_dimension` limits the JPEG size before Base64/MQTT transport. The
+`1` for a single ROI). The default `fixed_size: [320, 320]` makes the ROI one
+quarter of the 640x640 source frame; near an edge the crop shifts inward while
+remaining 320x320. `padding_ratio` is used only when `fixed_size` is removed,
+and `max_dimension` limits the JPEG size before Base64/MQTT transport. The
 dashboard subscribes to `vision/roi` by default; if the topic is changed, set
 the dashboard environment variable `MQTT_TOPIC_ROI` to the same value.
+`roi.target_labels` and `roi.minimum_confidence` also select the exact target
+sent to the PID service; keep them aligned with `control_service/config.yaml`.
+In the full-frame preview, green `DET` boxes are raw detector boxes and may
+change size. The orange `ROI 320x320` box is the fixed crop; only its position
+moves while following the target.
 
 ## Developing & Extending
 
@@ -192,7 +210,10 @@ Each service has its own **`config.yaml`** — edit directly for:
 | `vision/result` | Vision Service | LLM Orchestrator | `{description, session_id}` |
 | `vision/frame` | Vision Service | Dashboard | `{image_b64, timestamp, detections}` |
 | `vision/roi` | Vision Service | Dashboard | `{timestamp, frame_size, rois:[{name, confidence, bbox, crop_bbox, image_b64}]}` |
+| `vision/detections` | Vision Service | Control Service | `{tracking_target, detections, frame_size, coordinate_space, timestamp}` |
 | `gpio/command` | LLM Orchestrator | GPIO Service | `{type, ...params, session_id}` |
+| `gpio/command` | Control Service | GPIO Service | `{type:"gimbal", angles:{"1":pan,"2":tilt}, source:"visual_pid"}` |
+| `control/status` | Control Service | (broadcast) | `{mode, pan, tilt, pid_active, latency_ms}` |
 | `session/create` | Session Manager | (broadcast) | `{session_id, reason}` |
 | `session/end` | Session Manager | (broadcast) | `{session_id, reason}` |
 | `interrupt` | Voice Service | Session Manager | `{}` |

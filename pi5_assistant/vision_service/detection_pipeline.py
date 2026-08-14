@@ -23,6 +23,7 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+_AUTO_TRACKING_TARGET = object()
 
 
 class DetectionPipeline:
@@ -73,13 +74,41 @@ class DetectionPipeline:
         self.roi_enabled = bool(roi_cfg.get("enabled", False))
         self.roi_max_regions = int(roi_cfg.get("max_regions", 1))
         self.roi_padding_ratio = float(roi_cfg.get("padding_ratio", 0.05))
+        raw_fixed_size = roi_cfg.get("fixed_size")
+        if raw_fixed_size is None:
+            self.roi_fixed_size = None
+        elif isinstance(raw_fixed_size, (list, tuple)) and len(raw_fixed_size) == 2:
+            try:
+                self.roi_fixed_size = tuple(int(value) for value in raw_fixed_size)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("roi.fixed_size values must be integers") from exc
+        else:
+            raise ValueError("roi.fixed_size must be [width, height]")
         self.roi_max_dimension = int(roi_cfg.get("max_dimension", 320))
         self.roi_jpeg_quality = int(roi_cfg.get("jpeg_quality", 80))
+        self.roi_min_confidence = float(
+            roi_cfg.get("minimum_confidence", detection_cfg["confidence"])
+        )
+        raw_target_labels = roi_cfg.get("target_labels", [])
+        if not isinstance(raw_target_labels, (list, tuple)):
+            raise ValueError("roi.target_labels must be a list")
+        self.roi_target_labels = tuple(
+            str(label) for label in raw_target_labels
+        )
+        self.target_lock_max_distance = float(
+            roi_cfg.get("target_lock_max_distance", 0.25)
+        )
+        self.target_reacquire_frames = int(
+            roi_cfg.get("target_reacquire_frames", 3)
+        )
+        self._locked_target = None
+        self._locked_target_misses = 0
         self.roi_publish_interval = float(
             roi_cfg.get("publish_interval", self.frame_publish_interval)
         )
         self.topic_roi = config["mqtt"].get("topic_roi", "vision/roi")
         self._last_roi_publish = 0.0
+        self._frame_sequence = 0
         self._validate_roi_config()
 
         self.topic_fps_status = config["mqtt"].get(
@@ -92,12 +121,38 @@ class DetectionPipeline:
             raise ValueError("roi.max_regions must be at least 1")
         if not 0 <= self.roi_padding_ratio <= 1:
             raise ValueError("roi.padding_ratio must be between 0 and 1")
+        if self.roi_fixed_size is not None:
+            fixed_width, fixed_height = self.roi_fixed_size
+            if fixed_width < 1 or fixed_height < 1:
+                raise ValueError("roi.fixed_size dimensions must be positive")
+            base_width, base_height = self.config["camera"]["base_resolution"]
+            if fixed_width > base_width or fixed_height > base_height:
+                raise ValueError(
+                    "roi.fixed_size cannot exceed camera.base_resolution"
+                )
         if self.roi_max_dimension < 1:
             raise ValueError("roi.max_dimension must be at least 1")
+        if (
+            self.roi_fixed_size is not None
+            and self.roi_max_dimension < max(self.roi_fixed_size)
+        ):
+            raise ValueError(
+                "roi.max_dimension must be at least the largest fixed_size dimension"
+            )
         if not 1 <= self.roi_jpeg_quality <= 100:
             raise ValueError("roi.jpeg_quality must be between 1 and 100")
+        if not math.isfinite(self.roi_min_confidence) or not (
+            0.0 <= self.roi_min_confidence <= 1.0
+        ):
+            raise ValueError("roi.minimum_confidence must be between 0 and 1")
         if self.roi_publish_interval < 0:
             raise ValueError("roi.publish_interval cannot be negative")
+        if not 0 < self.target_lock_max_distance <= 1:
+            raise ValueError(
+                "roi.target_lock_max_distance must be in the range (0, 1]"
+            )
+        if self.target_reacquire_frames < 0:
+            raise ValueError("roi.target_reacquire_frames cannot be negative")
         # KAN: load the adaptive controller (pure numpy, no torch)
         kan_weights = Path(__file__).with_name("kan_weights.npz")
         self.kan = load_kan(str(kan_weights))
@@ -275,7 +330,9 @@ class DetectionPipeline:
                 if remaining > 0:
                     time.sleep(remaining)
 
-    def _publish_annotated_frame(self, frame, detections, timestamp):
+    def _publish_annotated_frame(
+        self, frame, detections, timestamp, tracking_target=None
+    ):
         """Publish a JPEG preview for the dashboard without exposing the camera."""
         if self.mqtt_client is None:
             return
@@ -287,9 +344,36 @@ class DetectionPipeline:
         for detection in detections:
             x, y, width, height = detection["bbox"]
             cv2.rectangle(preview, (x, y), (x + width, y + height), (40, 220, 110), 2)
-            label = f'{detection["name"]} {detection["confidence"]:.0%}'
+            label = f'DET {detection["name"]} {detection["confidence"]:.0%}'
             cv2.putText(preview, label, (x, max(20, y - 7)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40, 220, 110), 2)
+
+        # A detector bbox naturally changes with target distance. Draw the
+        # actual fixed crop separately so it cannot be mistaken for that box.
+        if tracking_target is not None:
+            frame_height, frame_width = frame.shape[:2]
+            crop_bbox = self._crop_bounds(
+                tracking_target.get("bbox"), frame_width, frame_height
+            )
+            if crop_bbox is not None:
+                roi_x, roi_y, roi_width, roi_height = crop_bbox
+                roi_colour = (40, 160, 255)
+                cv2.rectangle(
+                    preview,
+                    (roi_x, roi_y),
+                    (roi_x + roi_width, roi_y + roi_height),
+                    roi_colour,
+                    3,
+                )
+                cv2.putText(
+                    preview,
+                    f"ROI {roi_width}x{roi_height}",
+                    (roi_x, min(frame_height - 8, roi_y + 22)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.65,
+                    roi_colour,
+                    2,
+                )
 
         ok, encoded = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 75])
         if not ok:
@@ -302,7 +386,12 @@ class DetectionPipeline:
         self._last_frame_publish = now
 
     def _crop_bounds(self, bbox, frame_width, frame_height):
-        """Return a padded, clipped ``[x, y, width, height]`` crop."""
+        """Return a complete-frame ``[x, y, width, height]`` ROI crop.
+
+        With ``roi.fixed_size`` configured, the crop is centred on the raw
+        detection centre and shifted inward at frame edges so its dimensions
+        remain fixed. The detection centre itself remains the PID coordinate.
+        """
         try:
             x, y, width, height = (float(value) for value in bbox)
         except (TypeError, ValueError):
@@ -311,6 +400,22 @@ class DetectionPipeline:
             return None
         if width <= 0 or height <= 0:
             return None
+        if x + width <= 0 or y + height <= 0 or x >= frame_width or y >= frame_height:
+            return None
+
+        if self.roi_fixed_size is not None:
+            crop_width, crop_height = self.roi_fixed_size
+            # Fixed means exact. Do not silently publish a smaller ROI when an
+            # unexpected camera frame violates the configured size contract.
+            if frame_width < crop_width or frame_height < crop_height:
+                return None
+            center_x = x + width / 2.0
+            center_y = y + height / 2.0
+            x1 = round(center_x - crop_width / 2.0)
+            y1 = round(center_y - crop_height / 2.0)
+            x1 = max(0, min(int(frame_width) - crop_width, x1))
+            y1 = max(0, min(int(frame_height) - crop_height, y1))
+            return [x1, y1, crop_width, crop_height]
 
         pad_x = width * self.roi_padding_ratio
         pad_y = height * self.roi_padding_ratio
@@ -337,7 +442,10 @@ class DetectionPipeline:
 
         roi_height, roi_width = roi_frame.shape[:2]
         largest_dimension = max(roi_width, roi_height)
-        if largest_dimension > self.roi_max_dimension:
+        if self.roi_fixed_size is not None:
+            if (roi_width, roi_height) != self.roi_fixed_size:
+                return None
+        elif largest_dimension > self.roi_max_dimension:
             scale = self.roi_max_dimension / largest_dimension
             output_width = max(1, round(roi_width * scale))
             output_height = max(1, round(roi_height * scale))
@@ -360,7 +468,16 @@ class DetectionPipeline:
             "name": detection.get("name", "unknown"),
             "confidence": float(detection.get("confidence", 0.0)),
             "bbox": list(detection["bbox"]),
+            # This is the target coordinate used by the PID loop.  It is the
+            # centre of the original detection in the complete camera frame,
+            # not the centre of the padded/clipped JPEG crop.
+            "roi_center": list(self._pixel_center(detection)),
             "crop_bbox": crop_bbox,
+            "roi_size": {
+                "width": width,
+                "height": height,
+            },
+            "fixed_size": self.roi_fixed_size is not None,
             "image_size": {
                 "width": encoded_width,
                 "height": encoded_height,
@@ -369,7 +486,105 @@ class DetectionPipeline:
             "image_b64": base64.b64encode(encoded.tobytes()).decode("ascii"),
         }
 
-    def _publish_roi_images(self, frame, detections, timestamp):
+    def _rank_roi_candidates(
+        self, detections, frame_width=None, frame_height=None
+    ):
+        """Return the detections eligible to become the tracked ROI."""
+        candidates = []
+        for detection in detections:
+            try:
+                confidence = float(detection.get("confidence", 0.0))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if not math.isfinite(confidence):
+                continue
+            if (
+                frame_width is not None
+                and frame_height is not None
+                and self._crop_bounds(
+                    detection.get("bbox"), frame_width, frame_height
+                ) is None
+            ):
+                continue
+            if confidence >= self.roi_min_confidence and (
+                not self.roi_target_labels
+                or str(detection.get("name", "")) in self.roi_target_labels
+            ):
+                candidates.append(detection)
+        return sorted(
+            candidates,
+            key=lambda detection: float(detection.get("confidence", 0.0)),
+            reverse=True,
+        )
+
+    @staticmethod
+    def _pixel_center(detection):
+        """Return the ROI centre in complete-frame pixel coordinates."""
+        x, y, width, height = map(float, detection["bbox"][:4])
+        return x + width / 2.0, y + height / 2.0
+
+    @classmethod
+    def _normalised_center(cls, detection, frame_width, frame_height):
+        center_x, center_y = cls._pixel_center(detection)
+        return (
+            center_x / frame_width,
+            center_y / frame_height,
+        )
+
+    def _select_tracking_target(self, detections, frame_width, frame_height):
+        """Keep the same person/face when confidence ordering fluctuates."""
+        candidates = self._rank_roi_candidates(
+            detections, frame_width, frame_height
+        )
+        if not candidates:
+            self._locked_target_misses += 1
+            if self._locked_target_misses > self.target_reacquire_frames:
+                self._locked_target = None
+            return None
+
+        chosen = None
+        if self._locked_target is not None:
+            previous_label, previous_x, previous_y = self._locked_target
+            nearest_distance = float("inf")
+            for candidate in candidates:
+                if str(candidate.get("name", "")) != previous_label:
+                    continue
+                center_x, center_y = self._normalised_center(
+                    candidate, frame_width, frame_height
+                )
+                distance = math.hypot(
+                    center_x - previous_x, center_y - previous_y
+                )
+                if distance < nearest_distance:
+                    nearest_distance = distance
+                    chosen = candidate
+            if nearest_distance > self.target_lock_max_distance:
+                chosen = None
+
+        if chosen is None and self._locked_target is not None:
+            self._locked_target_misses += 1
+            if self._locked_target_misses <= self.target_reacquire_frames:
+                return None
+
+        if chosen is None:
+            chosen = candidates[0]
+
+        center_x, center_y = self._normalised_center(
+            chosen, frame_width, frame_height
+        )
+        self._locked_target = (
+            str(chosen.get("name", "")), center_x, center_y
+        )
+        self._locked_target_misses = 0
+        return chosen
+
+    def _publish_roi_images(
+        self,
+        frame,
+        detections,
+        timestamp,
+        tracking_target=_AUTO_TRACKING_TARGET,
+    ):
         """Publish confidence-ranked object crops as one atomic MQTT message."""
         if not self.roi_enabled or self.mqtt_client is None:
             return
@@ -378,11 +593,19 @@ class DetectionPipeline:
         if now - self._last_roi_publish < self.roi_publish_interval:
             return
 
-        ranked = sorted(
-            detections,
-            key=lambda detection: float(detection.get("confidence", 0.0)),
-            reverse=True,
+        frame_height, frame_width = frame.shape[:2]
+        ranked_candidates = self._rank_roi_candidates(
+            detections, frame_width, frame_height
         )
+        if tracking_target is _AUTO_TRACKING_TARGET:
+            ranked = ranked_candidates
+        elif tracking_target is None:
+            ranked = []
+        else:
+            ranked = [tracking_target] + [
+                candidate for candidate in ranked_candidates
+                if candidate is not tracking_target
+            ]
         rois = []
         for detection in ranked:
             roi = self._encode_roi(frame, detection, len(rois))
@@ -391,13 +614,14 @@ class DetectionPipeline:
             if len(rois) >= self.roi_max_regions:
                 break
 
-        frame_height, frame_width = frame.shape[:2]
         self.mqtt_client.publish(self.topic_roi, {
             "timestamp": timestamp,
             "frame_size": {
                 "width": frame_width,
                 "height": frame_height,
             },
+            "frame_center": [frame_width / 2.0, frame_height / 2.0],
+            "coordinate_space": "pixels",
             "rois": rois,
         })
         self._last_roi_publish = now
@@ -441,12 +665,38 @@ class DetectionPipeline:
             self.last_check_time = now
 
         frame_timestamp = time.time()
+        self._frame_sequence += 1
+        frame_height, frame_width = frame.shape[:2]
+        tracking_target = self._select_tracking_target(
+            detections, frame_width, frame_height
+        )
+        tracking_target_payload = None
+        if tracking_target is not None:
+            tracking_target_payload = dict(tracking_target)
+            tracking_target_payload["roi_center"] = list(
+                self._pixel_center(tracking_target)
+            )
         self.shared_buffer.update(detections, frame=frame)
-        self._publish_annotated_frame(frame, detections, frame_timestamp)
-        self._publish_roi_images(frame, detections, frame_timestamp)
+        self._publish_annotated_frame(
+            frame, detections, frame_timestamp, tracking_target
+        )
+        self._publish_roi_images(
+            frame, detections, frame_timestamp, tracking_target
+        )
         if self.mqtt_client is not None:
             self.mqtt_client.publish(self.config["mqtt"]["topic_detections"], {
                 "detections": detections,
+                # The PID service uses the same target selection as the ROI
+                # publisher, while retaining the complete list for observers.
+                "tracking_target": tracking_target_payload,
+                "frame_size": {
+                    "width": frame_width,
+                    "height": frame_height,
+                },
+                # At the configured 640x640 capture size this is [320, 320].
+                "frame_center": [frame_width / 2.0, frame_height / 2.0],
+                "coordinate_space": "pixels",
+                "sequence": self._frame_sequence,
                 "motion_profile": self.current_profile,
                 "motion_score": round(motion_score, 2),
                 "timestamp": frame_timestamp,

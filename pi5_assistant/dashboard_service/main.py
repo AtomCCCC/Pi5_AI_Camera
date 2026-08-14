@@ -34,7 +34,7 @@ PAGE = """<!doctype html>
     #frame{display:block;width:100%;min-height:360px;max-height:68vh;background:#05080c;border-radius:8px;object-fit:contain}
     .roi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
     .roi-card{margin:0;background:#111821;border:1px solid var(--line);border-radius:9px;padding:9px}
-    .roi-card img{display:block;width:100%;height:190px;background:#05080c;border-radius:6px;object-fit:contain}
+    .roi-card img{display:block;width:320px;height:320px;max-width:100%;aspect-ratio:1/1;margin:auto;background:#05080c;border-radius:6px;object-fit:contain}
     .roi-card figcaption{margin-top:8px;font-size:.86rem;line-height:1.35;color:var(--muted)}
     .empty{display:grid;place-items:center;min-height:150px;border:1px dashed #34465b;border-radius:8px;color:var(--muted)}
     .muted,.time{color:var(--muted)}.time{font-size:.8rem;margin:9px 0 0}
@@ -63,7 +63,7 @@ PAGE = """<!doctype html>
       <div id="detections" class="items"><span class="muted">Waiting for detector data</span></div>
       <h2 style="margin-top:24px">VLM scenario analysis</h2>
       <pre id="vlm" class="muted">No VLM response yet</pre>
-      <h2>LLM Response</h2>
+      <h2>LLM 响应</h2>
       <pre id="llm" class="muted">No LLM response yet</pre>
     </aside>
   </div>
@@ -115,7 +115,10 @@ PAGE = """<!doctype html>
       const caption = document.createElement('figcaption');
       const confidence = Math.round(Number(roi.confidence || 0) * 100);
       const crop = Array.isArray(roi.crop_bbox) ? roi.crop_bbox : [];
-      const size = crop.length === 4 ? ` · Cut ${crop[2]}×${crop[3]}` : '';
+      const roiSize = roi.roi_size || {};
+      const width = Number(roiSize.width || (crop.length === 4 ? crop[2] : 0));
+      const height = Number(roiSize.height || (crop.length === 4 ? crop[3] : 0));
+      const size = width && height ? ` · Fixed ROI ${width}×${height}` : '';
       caption.textContent = `${roi.name || 'unknown'} ${confidence}%${size}`;
       figure.append(image, caption);
       root.appendChild(figure);

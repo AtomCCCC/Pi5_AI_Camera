@@ -44,8 +44,18 @@ detection:
 roi:
   enabled: true
   max_regions: 1             # Increase for multiple simultaneous ROI images
-  padding_ratio: 0.08         # Extra border around each detection
-  max_dimension: 320          # Downscale crops to control MQTT payload size
+  # Keep this selection aligned with control_service/config.yaml. The bundled
+  # four-class HEF reports a human as "person"; a dedicated
+  # face-detection HEF normally reports "face". Both are accepted.
+  target_labels: ["person", "face"]
+  minimum_confidence: 0.65
+  target_lock_max_distance: 0.25  # Normalised centre distance per frame.
+  target_reacquire_frames: 3      # Hold briefly before switching to another face.
+  # One quarter of the 640x640 frame area: a fixed 320x320 crop centred on the
+  # detected target. Near an edge the crop shifts inward but stays 320x320.
+  fixed_size: [320, 320]
+  padding_ratio: 0.08         # Used only when fixed_size is removed/disabled
+  max_dimension: 320          # Encoded ROI remains at most 320x320
   jpeg_quality: 80
   publish_interval: 0.2       # seconds (5 ROI updates per second)
 

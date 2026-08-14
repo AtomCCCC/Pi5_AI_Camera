@@ -1,6 +1,10 @@
 """
 G3008 - Control Loop & Firmware Engineer (Role 4)  --  version 3
-==============================================================================
+============================================================================== 
+LEGACY OFFLINE SIMULATOR ONLY.  The live Pi implementation is
+``pi5_assistant/control_service`` and is started by ``run_all.sh``.  Do not set
+``USE_REAL_HARDWARE`` here for production tracking.
+
 Adds, on top of v2:
   1) PID gimbal control   - two PID loops (pan + tilt) keep the target centred.
   2) Smarter decide()     - confidence threshold + ROI smoothing (no jumps).
