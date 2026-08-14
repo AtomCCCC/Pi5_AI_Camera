@@ -110,6 +110,10 @@ class DetectionPipeline:
         self._last_roi_publish = 0.0
         self._frame_sequence = 0
         self._validate_roi_config()
+        self.t_min = 0.05
+        self.t_max = 0.5
+        self.alpha_lambda = 0.8
+        self.alpha_smooth = 0.0
 
         self.topic_fps_status = config["mqtt"].get(
             "topic_fps_status",
@@ -225,6 +229,14 @@ class DetectionPipeline:
         elif alpha < 0.4:
             self.current_profile = "low_motion"
         return self.current_profile
+        
+    def _capture_interval(self, alpha):
+        """Map alpha in [0,1] to a capture period by geometric interpolation."""
+        a = min(max(alpha, 0.0), 1.0)
+        self.alpha_smooth = (self.alpha_lambda * self.alpha_smooth
+                             + (1.0 - self.alpha_lambda) * a)
+        ratio = self.t_max / self.t_min
+        return self.t_min * (ratio ** (1.0 - self.alpha_smooth))
 
     def _capture_frame(self, w, h):
         """Capture a single frame via rpicam-jpeg."""
@@ -325,8 +337,8 @@ class DetectionPipeline:
                 logger.exception("Vision frame processing failed")
                 time.sleep(1)
             else:
-                # Avoid a tight retry loop if camera capture returns immediately.
-                remaining = 0.01 - (time.monotonic() - started)
+                interval = self._capture_interval(self.last_alpha)
+                remaining = interval - (time.monotonic() - started)
                 if remaining > 0:
                     time.sleep(remaining)
 
