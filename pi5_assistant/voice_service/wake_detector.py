@@ -37,7 +37,10 @@ class WakeDetector:
             on_wake: Callback invoked as on_wake(audio_buffer: np.ndarray)
         """
         from openwakeword import Model
-        self._engine = Model(wakeword_models=[self.model_name])
+        self._engine = Model(
+    wakeword_models=[self.model_name],
+    inference_framework="onnx",
+                 )
         self._running = True
         self._thread = threading.Thread(
             target=self._listen_loop,
@@ -68,7 +71,8 @@ class WakeDetector:
             self._buffer_pos = (self._buffer_pos + n) % self.buffer_size
 
             # Run wake word detection
-            prediction = self._engine.predict(audio)
+            pcm16 = np.clip(audio * 32767, -32768, 32767).astype(np.int16)
+            prediction = self._engine.predict(pcm16)
             if prediction[self.model_name] >= self.sensitivity:
                 # Grab the full buffer as context
                 if self._buffer_pos == 0:
